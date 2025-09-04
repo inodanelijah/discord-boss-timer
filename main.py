@@ -1,7 +1,8 @@
 import discord
 from discord.ext import commands, tasks
-from discord.ui import Button, View
-from datetime import datetime, timedelta, timezone
+from discord.ui import View, Button
+#from datetime import datetime, timedelta, UTC
+from datetime import datetime, timedelta, UTC
 import json
 import os
 
@@ -15,191 +16,120 @@ intents = discord.Intents.default()
 intents.message_content = True  # REQUIRED for commands
 bot = commands.Bot(command_prefix='/', intents=intents)
 
-# ----------------------------
-# Data handling
-# ----------------------------
-if os.path.exists(DATA_FILE):
-    with open(DATA_FILE, "r") as f:
-        bosses = json.load(f)
-else:
-    bosses = {}
+bosses = {}  # Store boss info
+reminder_sent = set()  # Track which bosses already had 5-min reminder
 
-def save_bosses():
-    with open(DATA_FILE, "w") as f:
-        json.dump(bosses, f, indent=4)
-
-# ----------------------------
-# Button View for Update TOD
-# ----------------------------
-class BossButtons(View):
-    def __init__(self, boss_name):
+# Button class to mark time of death
+class BossDeathButton(discord.ui.View):
+    def __init__(self, boss_name: str):
         super().__init__(timeout=None)
         self.boss_name = boss_name
 
-    @discord.ui.button(label="Update TOD", style=discord.ButtonStyle.primary)
-    async def update_tod(self, interaction: discord.Interaction, button: discord.ui.Button):
-        now = datetime.now(UTC)
+    @discord.ui.button(label="Time of Death", style=discord.ButtonStyle.red)
+    async def death_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.boss_name in bosses:
+            now = datetime.now()
+            bosses[self.boss_name]["death_time"] = now
+            respawn_time = now + bosses[self.boss_name]["respawn_time"]
+            # Reset reminder tracking
+            if self.boss_name in reminder_sent:
+                reminder_sent.remove(self.boss_name)
+            await interaction.response.send_message(
+                f"Boss '{self.boss_name}' marked dead at {now.strftime('%I:%M:%S %p')}.\n"
+                f"Respawns at: {respawn_time.strftime('%I:%M:%S %p')} (in {bosses[self.boss_name]['respawn_time']})",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(f"Boss '{self.boss_name}' not found!", ephemeral=True)
 
-        boss = bosses.get(self.boss_name)
-        if not boss:
-            await interaction.response.send_message("Boss not found!", ephemeral=True)
-            return
+# Command to add a boss with a button
+@bot.command(name="boss_add")
+async def boss_add(ctx, name: str, respawn_hours: float):
+    spawn_time = datetime.now()
+    bosses[name] = {
+        "spawn_time": spawn_time,
+        "death_time": None,
+        "respawn_time": timedelta(hours=respawn_hours)
+    }
+    view = BossDeathButton(name)
+    await ctx.send(f"Boss '{name}' added! Respawn time: {respawn_hours} hours.", view=view)
 
-        boss["last_tod"] = now.isoformat()
+# Command to check status of a boss
+@bot.command(name="boss_status")
+async def boss_status(ctx, name: str = None):
+    now = datetime.now()
+    if name:
+        if name in bosses:
+            boss = bosses[name]
+            status = "Alive" if boss["death_time"] is None else "Dead"
+            respawn_msg = "N/A"
+            if boss["death_time"]:
+                respawn_time = boss["death_time"] + boss["respawn_time"]
+                if now >= respawn_time:
+                    status = "Alive"
+                    boss["death_time"] = None
+                else:
+                    remaining = respawn_time - now
+                    hours, remainder = divmod(int(remaining.total_seconds()), 3600)
+                    minutes, seconds = divmod(remainder, 60)
+                    respawn_msg = f"{hours}h {minutes}m {seconds}s (at {respawn_time.strftime('%I:%M:%S %p')})"
 
-        if boss["type"] == "interval":
-            interval_hours = boss.get("interval", 0)
-            boss["next_respawn"] = (now + timedelta(hours=interval_hours)).isoformat()
+            view = BossDeathButton(name) if status == "Alive" else None
 
-        elif boss["type"] == "fixed":
-            times = boss.get("times", [])
-            next_time = None
-            days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-
-            for i in range(7):  # check next 7 days
-                check_day = (now.weekday() + i) % 7
-                for t in times:
-                    day, clock = t.split()
-                    if day not in days:
-                        continue
-                    day_index = days.index(day)
-                    candidate = now.replace(hour=int(clock.split(":")[0]),
-                                            minute=int(clock.split(":")[1]),
-                                            second=0, microsecond=0)
-                    candidate += timedelta(days=(day_index - now.weekday() + i) % 7)
-                    if candidate > now:
-                        next_time = candidate
-                        break
-                if next_time:
-                    break
-
-            if next_time:
-                boss["next_respawn"] = next_time.isoformat()
-
-        save_bosses()
-
-        await interaction.response.send_message(
-            f"**{self.boss_name}** TOD updated to now. Next respawn: {boss['next_respawn']}",
-            ephemeral=False
-        )
-
-# ----------------------------
-# Commands
-# ----------------------------
-@bot.tree.command(name="boss_add", description="Add a boss (interval or fixed).")
-async def boss_add(interaction: discord.Interaction, name: str, type: str, time: str = None, hours: int = None):
-    name = name.strip()
-
-    if type == "fixed":
-        if not time:
-            await interaction.response.send_message("Provide times: e.g., Mon 11:30,Thu 19:00", ephemeral=True)
-            return
-        bosses[name] = {
-            "type": "fixed",
-            "times": [t.strip() for t in time.split(",")],
-            "next_respawn": None
-        }
-
-    elif type == "interval":
-        if hours is None:
-            await interaction.response.send_message("For interval bosses, provide hours (e.g., 4)", ephemeral=True)
-            return
-        now = datetime.now(UTC)
-        bosses[name] = {
-            "type": "interval",
-            "interval": hours,
-            "next_respawn": (now + timedelta(hours=hours)).isoformat()
-        }
+            await ctx.send(
+                f"{name} - Status: {status}\n"
+                f"Spawn Time: {boss['spawn_time'].strftime('%I:%M:%S %p')}\n"
+                f"Death Time: {boss['death_time'].strftime('%I:%M:%S %p') if boss['death_time'] else 'N/A'}\n"
+                f"Respawn In: {respawn_msg}",
+                view=view
+            )
+        else:
+            await ctx.send(f"Boss '{name}' not found!")
     else:
-        await interaction.response.send_message("Type must be 'fixed' or 'interval'.", ephemeral=True)
-        return
+        for b_name, info in bosses.items():
+            status = "Alive" if info["death_time"] is None else "Dead"
+            respawn_msg = ""
+            if info["death_time"]:
+                respawn_time = info["death_time"] + info["respawn_time"]
+                if now >= respawn_time:
+                    status = "Alive"
+                    info["death_time"] = None
+                else:
+                    remaining = respawn_time - now
+                    hours, remainder = divmod(int(remaining.total_seconds()), 3600)
+                    minutes, seconds = divmod(remainder, 60)
+                    respawn_msg = f"{hours}h {minutes}m {seconds}s"
 
-    save_bosses()
-    await interaction.response.send_message(f"Boss **{name}** added successfully!", ephemeral=False)
+            view = BossDeathButton(b_name) if status == "Alive" else None
+            await ctx.send(f"{b_name} - {status} - Respawn In: {respawn_msg or 'N/A'}", view=view)
 
-@bot.tree.command(name="boss_status", description="Show all boss timers with Update TOD buttons.")
-async def boss_status(interaction: discord.Interaction):
-    if not bosses:
-        await interaction.response.send_message("No bosses added yet.", ephemeral=True)
-        return
+# Background task to announce respawns and 5-minute reminders
+@tasks.loop(seconds=30)
+async def check_boss_respawns():
+    now = datetime.now()
+    for name, info in bosses.items():
+        if info["death_time"]:
+            respawn_time = info["death_time"] + info["respawn_time"]
+            channel = discord.utils.get(bot.get_all_channels(), name='general')  # Change to your channel
+            if not channel:
+                continue
 
-    embed = discord.Embed(title="Boss Status", color=discord.Color.blue())
-    for name, data in bosses.items():
-        if data["type"] == "interval":
-            respawn = data.get("next_respawn", "Not set")
-            embed.add_field(name=name, value=f"Interval: {data['interval']}h\nNext: {respawn}", inline=False)
-        elif data["type"] == "fixed":
-            times = ", ".join(data.get("times", []))
-            embed.add_field(name=name, value=f"Fixed: {times}\nNext: {data.get('next_respawn', 'Not set')}", inline=False)
+            # 5-minute reminder
+            if 0 < (respawn_time - now).total_seconds() <= 300:  # 5 minutes
+                if name not in reminder_sent:
+                    await channel.send(f"Reminder: Boss '{name}' will respawn in 5 minutes!")
+                    reminder_sent.add(name)
 
-    view = View()
-    for boss_name in bosses.keys():
-        view.add_item(BossButtons(boss_name).children[0])  # Add Update TOD button per boss
-
-    await interaction.response.send_message(embed=embed, view=view)
-
-@bot.tree.command(name="boss_list", description="Quick list of all boss names.")
-async def boss_list(interaction: discord.Interaction):
-    if not bosses:
-        await interaction.response.send_message("No bosses found.", ephemeral=True)
-        return
-    boss_names = ", ".join(bosses.keys())
-    await interaction.response.send_message(f"Bosses: {boss_names}")
-
-@bot.tree.command(name="boss_clear", description="Delete all bosses.")
-async def boss_clear(interaction: discord.Interaction):
-    bosses.clear()
-    save_bosses()
-    await interaction.response.send_message("All bosses have been cleared.")
-
-@bot.tree.command(name="boss_update", description="Manually update TOD for a boss.")
-async def boss_update(interaction: discord.Interaction, name: str, new_tod: str):
-    boss = bosses.get(name)
-    if not boss:
-        await interaction.response.send_message(f"Boss '{name}' not found.", ephemeral=True)
-        return
-    boss["last_tod"] = new_tod
-    save_bosses()
-    await interaction.response.send_message(f"Boss {name} TOD updated to {new_tod}")
-
-@bot.tree.command(name="boss_next", description="Show next boss to spawn.")
-async def boss_next(interaction: discord.Interaction):
-    next_boss = None
-    soonest_time = None
-
-    for name, data in bosses.items():
-        if data.get("next_respawn"):
-            respawn = datetime.fromisoformat(data["next_respawn"])
-            if soonest_time is None or respawn < soonest_time:
-                soonest_time = respawn
-                next_boss = name
-
-    if next_boss:
-        await interaction.response.send_message(f"Next boss: **{next_boss}** at {soonest_time}")
-    else:
-        await interaction.response.send_message("No upcoming bosses found.")
-
-# ----------------------------
-# Background Task for Reminders
-# ----------------------------
-@tasks.loop(minutes=1)
-async def boss_checker():
-    now = datetime.now(timezone.utc)
-    channel = bot.get_channel(CHANNEL_ID)
-    if not channel:
-        return
-
-    for name, data in bosses.items():
-        if data["type"] == "fixed":
-            if "next_respawn" in data and data["next_respawn"]:
-                respawn_time = datetime.fromisoformat(data["next_respawn"])
-                if 0 < (respawn_time - now).total_seconds() <= 300:
-                    await channel.send(f"⚠️ **{name}** will respawn in 5 minutes! ({respawn_time})")
+            # Boss has respawned
+            if now >= respawn_time:
+                await channel.send(f"Boss '{name}' has respawned!")
+                info["death_time"] = None
+                if name in reminder_sent:
+                    reminder_sent.remove(name)
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user}")
-    await bot.tree.sync()
-    boss_checker.start()
+    print(f"Bot logged in as {bot.user}")
+    check_boss_respawns.start()
 
 bot.run(TOKEN)
