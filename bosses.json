@@ -1,0 +1,19 @@
+{
+    "Venatus": {
+        "tod": "04:16",
+        "hours": 1,
+        "type": "interval"
+    },
+    "Viorent": {
+        "tod": "3:57",
+        "hours": 10,
+        "type": "interval"
+    },
+    "Clemantis": {
+        "type": "weekly",
+        "schedule": [
+            "Mon 11:30",
+            "Thu 19:00"
+        ]
+    }
+}
