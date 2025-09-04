@@ -1,3 +1,21 @@
+import os
+from flask import Flask
+from threading import Thread
+
+# --- Flask server to satisfy Render port requirement ---
+app = Flask("")
+
+@app.route("/")
+def home():
+    return "Bot is running!"
+
+def run_server():
+    port = int(os.environ.get("PORT", 5000))  # Render provides PORT
+    app.run(host="0.0.0.0", port=port)
+
+# Start Flask in a separate thread
+Thread(target=run_server).start()
+
 import discord
 from discord.ext import commands, tasks
 from discord.ui import View, Button
