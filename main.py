@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands, tasks
-from discord.ui import View, Button
+from discord.ui import Button, View
 from datetime import datetime, timedelta
 import json
 import os
@@ -17,205 +17,203 @@ bot = commands.Bot(command_prefix='/', intents=intents)
 
 bosses = {}
 
-# ------------------- DATA HANDLING -------------------
-def load_data():
-    global bosses
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r") as f:
-            bosses = json.load(f)
+# --------- Data Helpers ---------
 
-def save_data():
+def load_bosses():
+    if not os.path.exists(DATA_FILE):
+        return {}
+    with open(DATA_FILE, "r") as f:
+        return json.load(f)
+
+def save_bosses(bosses):
     with open(DATA_FILE, "w") as f:
         json.dump(bosses, f, indent=4)
 
-load_data()
+# --------- Interactive Buttons ---------
 
-# ------------------- BUTTONS -------------------
 class BossButtons(View):
     def __init__(self, boss_name):
         super().__init__(timeout=None)
         self.boss_name = boss_name
 
-    @discord.ui.button(label="Set TOD Now", style=discord.ButtonStyle.success)
-    async def set_tod_now(self, interaction: discord.Interaction, button: Button):
-        now = datetime.now().strftime("%H:%M")
-
-        if self.boss_name not in bosses:
-            await interaction.response.send_message(f"❌ Boss **{self.boss_name}** not found.", ephemeral=True)
-            return
-
-        boss = bosses[self.boss_name]
-        if boss["type"] != "interval":
-            await interaction.response.send_message(
-                f"⚠️ Boss **{self.boss_name}** is weekly-based — edit its schedule manually.",
-                ephemeral=True
-            )
-            return
-
-        boss["tod"] = now
-        save_data()
+    @discord.ui.button(label="Update TOD", style=discord.ButtonStyle.primary)
+    async def update_tod(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
-            f"✅ TOD for **{self.boss_name}** updated to `{now}`.\nNext spawn recalculated!",
+            f"Enter new TOD for **{self.boss_name}** in format `YYYY-MM-DD HH:MM`:",
             ephemeral=True
         )
 
-# ------------------- COMMANDS -------------------
+        def check(msg):
+            return msg.author == interaction.user and msg.channel == interaction.channel
+
+        try:
+            msg = await bot.wait_for("message", timeout=60.0, check=check)
+            new_tod = msg.content.strip()
+            bosses = load_bosses()
+            if self.boss_name not in bosses:
+                await interaction.followup.send("❌ Boss not found.", ephemeral=True)
+                return
+            bosses[self.boss_name]["last_killed"] = new_tod
+            save_bosses(bosses)
+            await interaction.followup.send(f"✅ TOD updated for **{self.boss_name}** → {new_tod}", ephemeral=True)
+        except:
+            await interaction.followup.send("❌ Timeout. No TOD updated.", ephemeral=True)
+
+    @discord.ui.button(label="Delete Boss", style=discord.ButtonStyle.danger)
+    async def delete_boss(self, interaction: discord.Interaction, button: discord.ui.Button):
+        bosses = load_bosses()
+        if self.boss_name in bosses:
+            del bosses[self.boss_name]
+            save_bosses(bosses)
+            await interaction.response.send_message(f"🗑 Deleted boss **{self.boss_name}**", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Boss not found.", ephemeral=True)
+
+# --------- Commands ---------
+
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
     boss_checker.start()
 
-@bot.command(name="boss_add")
-async def boss_add(ctx, name: str, time: str, hours: int):
-    bosses[name] = {"type": "interval", "tod": time, "hours": hours}
-    save_data()
-    await ctx.send(f"✅ Added **{name}**! TOD: {time}, Respawn: {hours}h", view=BossButtons(name))
+@bot.command()
+async def boss_add(ctx, name: str, respawn_type: str, *, data: str = None):
+    bosses = load_bosses()
+    respawn_type = respawn_type.lower()
 
-@bot.command(name="boss_add_weekly")
-async def boss_add_weekly(ctx, name: str, *schedule):
-    # Auto-convert short day names to full
-    days_full = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-    days_short = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    if respawn_type == "interval":
+        try:
+            hours = int(data)
+            bosses[name] = {
+                "type": "interval",
+                "hours": hours,
+                "last_killed": None
+            }
+            save_bosses(bosses)
+            await ctx.send(f"✅ Added interval boss **{name}** with respawn every {hours} hours.")
+        except (ValueError, TypeError):
+            await ctx.send("❌ Invalid interval format. Use `/boss_add Name interval 4`.")
 
-    converted_schedule = []
-    for entry in schedule:
-        if any(entry.startswith(d) for d in days_short + days_full):
-            converted_schedule.append(entry)
-        else:
-            converted_schedule[-1] += " " + entry  # Combine day with time
+    elif respawn_type == "fixed":
+        if not data:
+            await ctx.send("❌ Please provide a schedule: `/boss_add Clemantis fixed Mon 11:30,Thu 19:00`")
+            return
+        schedules = [s.strip() for s in data.split(",")]
+        bosses[name] = {
+            "type": "fixed",
+            "schedule": schedules,
+            "last_killed": None
+        }
+        save_bosses(bosses)
+        await ctx.send(f"✅ Added fixed boss **{name}** with schedule: {', '.join(schedules)}")
 
-    bosses[name] = {"type": "weekly", "schedule": converted_schedule}
-    save_data()
-    await ctx.send(f"✅ Added **{name}** with schedule: {', '.join(converted_schedule)}")
-
-@bot.command(name="boss_remove")
-async def boss_remove(ctx, name: str):
-    if name in bosses:
-        del bosses[name]
-        save_data()
-        await ctx.send(f"🗑️ Removed boss **{name}**")
     else:
-        await ctx.send(f"❌ Boss **{name}** not found")
+        await ctx.send("❌ Invalid type. Use `interval` or `fixed`.")
 
-@bot.command(name="boss_clear")
-async def boss_clear(ctx):
-    bosses.clear()
-    save_data()
-    await ctx.send("🗑️ All bosses have been cleared!")
-
-@bot.command(name="boss_list")
-async def boss_list(ctx):
+@bot.command()
+async def boss_status(ctx):
+    bosses = load_bosses()
     if not bosses:
         await ctx.send("No bosses added yet.")
-    else:
-        boss_names = "\n".join(bosses.keys())
-        await ctx.send(f"**Boss List:**\n{boss_names}")
-
-@bot.command(name="boss_update")
-async def boss_update(ctx, name: str, new_tod: str):
-    if name not in bosses or bosses[name]["type"] != "interval":
-        await ctx.send(f"❌ Boss **{name}** not found or not an interval boss.")
         return
 
-    bosses[name]["tod"] = new_tod
-    save_data()
-    await ctx.send(f"✅ TOD for **{name}** updated to `{new_tod}`.")
+    for name, data in bosses.items():
+        description = ""
+        if data["type"] == "interval":
+            description = f"Every {data['hours']}h"
+        else:
+            description = f"Fixed: {', '.join(data['schedule'])}"
 
-@bot.command(name="boss_next")
+        view = BossButtons(name)
+        await ctx.send(f"**{name}** → {description}", view=view)
+
+@bot.command()
+async def boss_list(ctx):
+    bosses = load_bosses()
+    if not bosses:
+        await ctx.send("No bosses available.")
+        return
+    await ctx.send(f"**Bosses:** {', '.join(bosses.keys())}")
+
+@bot.command()
+async def boss_clear(ctx):
+    save_bosses({})
+    await ctx.send("All bosses cleared!")
+
+@bot.command()
+async def boss_update(ctx, name: str, *, new_tod: str):
+    bosses = load_bosses()
+    if name not in bosses:
+        await ctx.send(f"Boss {name} not found.")
+        return
+    bosses[name]["last_killed"] = new_tod
+    save_bosses(bosses)
+    await ctx.send(f"Updated TOD for **{name}** to {new_tod}")
+
+@bot.command()
 async def boss_next(ctx):
+    bosses = load_bosses()
     now = datetime.now()
-    soonest_name = None
-    soonest_time = None
-
-    days_full = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-    days_short = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    next_boss = None
+    next_time = None
+    days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
     for name, data in bosses.items():
-        if data["type"] == "interval":
-            tod = datetime.strptime(data["tod"], "%H:%M").replace(year=now.year, month=now.month, day=now.day)
-            next_spawn = tod + timedelta(hours=data["hours"])
-        else:  # weekly
-            next_spawn = None
-            for schedule in data["schedule"]:
-                day, time = schedule.split()
-                if day in days_short:
-                    day = days_full[days_short.index(day)]
-                spawn_time = datetime.strptime(time, "%H:%M").replace(year=now.year, month=now.month, day=now.day)
-                day_num = days_full.index(day)
-                spawn_time = spawn_time.replace(day=now.day + ((day_num - now.weekday()) % 7))
-                if next_spawn is None or spawn_time < next_spawn:
-                    next_spawn = spawn_time
+        if data["type"] == "fixed":
+            for sched in data["schedule"]:
+                try:
+                    day_str, time_str = sched.split()
+                    target_day = days.index(day_str)
+                    target_time = datetime.strptime(time_str, "%H:%M").time()
+                    today_num = now.weekday()
+                    delta_days = (target_day - today_num) % 7
+                    spawn_date = (now + timedelta(days=delta_days)).replace(hour=target_time.hour,
+                                                                           minute=target_time.minute,
+                                                                           second=0, microsecond=0)
+                    if spawn_date < now:
+                        spawn_date += timedelta(days=7)
+                    if not next_time or spawn_date < next_time:
+                        next_time = spawn_date
+                        next_boss = name
+                except:
+                    continue
 
-        if soonest_time is None or next_spawn < soonest_time:
-            soonest_name = name
-            soonest_time = next_spawn
-
-    if soonest_name:
-        await ctx.send(f"**Next Boss:** {soonest_name} → {soonest_time.strftime('%A %H:%M')}")
+    if next_boss:
+        await ctx.send(f"Next boss: **{next_boss}** at {next_time.strftime('%a %H:%M')}")
     else:
         await ctx.send("No upcoming bosses found.")
 
-@bot.command(name="boss_status")
-async def boss_status(ctx):
-    if not bosses:
-        await ctx.send("No bosses added yet.")
-        return
+# --------- Background Task ---------
 
-    now = datetime.now()
-    days_full = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-    days_short = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-
-    for name, data in bosses.items():
-        embed = discord.Embed(title=f"Boss: {name}", color=0x00ff00)
-        if data["type"] == "interval":
-            tod = datetime.strptime(data["tod"], "%H:%M").replace(year=now.year, month=now.month, day=now.day)
-            interval = timedelta(hours=data["hours"])
-            next_spawn = tod + interval
-            remaining = next_spawn - now
-            embed.add_field(name="TOD", value=data['tod'], inline=True)
-            embed.add_field(name="Respawn", value=f"{data['hours']}h", inline=True)
-            embed.add_field(name="Next Spawn", value=next_spawn.strftime('%A %H:%M'), inline=False)
-            embed.add_field(name="Countdown", value=str(remaining).split('.')[0], inline=False)
-            await ctx.send(embed=embed, view=BossButtons(name))
-        elif data["type"] == "weekly":
-            schedule_str = ""
-            for schedule in data["schedule"]:
-                day, time = schedule.split()
-                if day in days_short:
-                    day = days_full[days_short.index(day)]
-                schedule_str += f"{day} {time}\n"
-            embed.add_field(name="Schedule", value=schedule_str.strip(), inline=False)
-            await ctx.send(embed=embed)
-
-# ------------------- TASKS -------------------
-@tasks.loop(seconds=60)
+@tasks.loop(minutes=1)
 async def boss_checker():
+    bosses = load_bosses()
     now = datetime.now()
-    channel = bot.get_channel(CHANNEL_ID)
-
-    days_full = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-    days_short = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
     for name, data in bosses.items():
-        if data["type"] == "interval":
-            tod = datetime.strptime(data["tod"], "%H:%M").replace(year=now.year, month=now.month, day=now.day)
-            next_spawn = tod + timedelta(hours=data["hours"])
-            remaining = next_spawn - now
+        if data["type"] == "fixed":
+            for sched in data["schedule"]:
+                try:
+                    day_str, time_str = sched.split()
+                    target_day = days.index(day_str)
+                    target_time = datetime.strptime(time_str, "%H:%M").time()
+                    today_num = now.weekday()
+                    delta_days = (target_day - today_num) % 7
+                    spawn_time = (now + timedelta(days=delta_days)).replace(hour=target_time.hour,
+                                                                           minute=target_time.minute,
+                                                                           second=0, microsecond=0)
+                    if spawn_time < now:
+                        spawn_time += timedelta(days=7)
 
-            if 0 < remaining.total_seconds() <= 300:  # 5-minute reminder
-                await channel.send(f"⏰ **{name}** will respawn in 5 minutes! ({next_spawn.strftime('%H:%M')})")
+                    reminder_time = spawn_time - timedelta(minutes=5)
+                    if now >= reminder_time and now < reminder_time + timedelta(minutes=1):
+                        channel = bot.get_channel(CHANNEL_ID)
+                        if channel:
+                            await channel.send(f"⏳ **{name}** will respawn in 5 minutes! ({spawn_time.strftime('%H:%M')})")
+                except:
+                    continue
 
-        elif data["type"] == "weekly":
-            for schedule in data["schedule"]:
-                day, time = schedule.split()
-                if day in days_short:
-                    day = days_full[days_short.index(day)]
-                spawn_time = datetime.strptime(time, "%H:%M").replace(year=now.year, month=now.month, day=now.day)
-                day_num = days_full.index(day)
-                spawn_time = spawn_time.replace(day=now.day + ((day_num - now.weekday()) % 7))
-
-                remaining = spawn_time - now
-                if 0 < remaining.total_seconds() <= 300:
-                    await channel.send(f"⏰ **{name}** (weekly) will respawn in 5 minutes! ({spawn_time.strftime('%A %H:%M')})")
+# --------- Run ---------
 
 bot.run(TOKEN)
