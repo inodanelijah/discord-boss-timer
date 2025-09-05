@@ -37,7 +37,7 @@ bot = commands.Bot(command_prefix='/', intents=intents)
 bosses = {}  # Store boss info
 reminder_sent = set()  # Track which bosses already had 5-min reminder
 
-# Button class to mark time of death
+# --- Button class for Time of Death ---
 class BossDeathButton(discord.ui.View):
     def __init__(self, boss_name: str):
         super().__init__(timeout=None)
@@ -49,18 +49,18 @@ class BossDeathButton(discord.ui.View):
             now = datetime.now()
             bosses[self.boss_name]["death_time"] = now
             respawn_time = now + bosses[self.boss_name]["respawn_time"]
-            # Reset reminder tracking
             if self.boss_name in reminder_sent:
                 reminder_sent.remove(self.boss_name)
+
             await interaction.response.send_message(
-                f"Boss '{self.boss_name}' marked dead at {now.strftime('%I:%M:%S %p')}.\n"
+                f"Boss '{self.boss_name}' marked dead by {interaction.user.mention} at {now.strftime('%I:%M:%S %p')}.\n"
                 f"Respawns at: {respawn_time.strftime('%I:%M:%S %p')} (in {bosses[self.boss_name]['respawn_time']})",
                 ephemeral=True
             )
         else:
             await interaction.response.send_message(f"Boss '{self.boss_name}' not found!", ephemeral=True)
 
-# Command to add a boss with a button
+# --- Add a boss ---
 @bot.command(name="boss_add")
 async def boss_add(ctx, name: str, respawn_hours: float):
     spawn_time = datetime.now()
@@ -72,12 +72,13 @@ async def boss_add(ctx, name: str, respawn_hours: float):
     view = BossDeathButton(name)
     await ctx.send(f"Boss '{name}' added! Respawn time: {respawn_hours} hours.", view=view)
 
-# Command to check status of a boss
+# --- Check boss status ---
 @bot.command(name="boss_status")
 async def boss_status(ctx, name: str = None):
     now = datetime.now()
-    
-    if name:  # Single boss
+
+    if name:
+        # Single boss status
         if name in bosses:
             boss = bosses[name]
             status = "Alive" if boss["death_time"] is None else "Dead"
@@ -104,14 +105,14 @@ async def boss_status(ctx, name: str = None):
             )
         else:
             await ctx.send(f"Boss '{name}' not found!")
-
-    else:  # All bosses
+    else:
+        # All bosses status in a single message
         if not bosses:
             await ctx.send("No bosses added yet!")
             return
 
         message_lines = []
-        views = []
+        alive_views = []
         for b_name, info in bosses.items():
             status = "Alive" if info["death_time"] is None else "Dead"
             respawn_msg = "N/A"
@@ -128,31 +129,48 @@ async def boss_status(ctx, name: str = None):
 
             message_lines.append(f"{b_name} - {status} - Respawn In: {respawn_msg}")
             if status == "Alive":
-                views.append(BossDeathButton(b_name))  # Collect alive boss buttons
+                alive_views.append(BossDeathButton(b_name))
 
         view = None
-        if views:
-            # Create a single view with all buttons
+        if alive_views:
             view = View(timeout=None)
-            for v in views:
+            for v in alive_views:
                 for child in v.children:
                     view.add_item(child)
 
         await ctx.send("\n".join(message_lines), view=view)
-        
-# Background task to announce respawns and 5-minute reminders
+
+# --- Delete a specific boss ---
+@bot.command(name="boss_delete")
+async def boss_delete(ctx, name: str):
+    if name in bosses:
+        bosses.pop(name)
+        if name in reminder_sent:
+            reminder_sent.remove(name)
+        await ctx.send(f"Boss '{name}' has been deleted.")
+    else:
+        await ctx.send(f"Boss '{name}' not found!")
+
+# --- Clear all bosses ---
+@bot.command(name="boss_clear")
+async def boss_clear(ctx):
+    bosses.clear()
+    reminder_sent.clear()
+    await ctx.send("All bosses have been cleared!")
+
+# --- Background task for respawns and 5-min reminders ---
 @tasks.loop(seconds=30)
 async def check_boss_respawns():
     now = datetime.now()
     for name, info in bosses.items():
         if info["death_time"]:
             respawn_time = info["death_time"] + info["respawn_time"]
-            channel = discord.utils.get(bot.get_all_channels(), name='general')  # Change to your channel
+            channel = discord.utils.get(bot.get_all_channels(), id=CHANNEL_ID)
             if not channel:
                 continue
 
             # 5-minute reminder
-            if 0 < (respawn_time - now).total_seconds() <= 300:  # 5 minutes
+            if 0 < (respawn_time - now).total_seconds() <= 300:
                 if name not in reminder_sent:
                     await channel.send(f"Reminder: Boss '{name}' will respawn in 5 minutes!")
                     reminder_sent.add(name)
@@ -164,6 +182,7 @@ async def check_boss_respawns():
                 if name in reminder_sent:
                     reminder_sent.remove(name)
 
+# --- Bot ready event ---
 @bot.event
 async def on_ready():
     print(f"Bot logged in as {bot.user}")
