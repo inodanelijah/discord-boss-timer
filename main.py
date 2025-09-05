@@ -76,7 +76,8 @@ async def boss_add(ctx, name: str, respawn_hours: float):
 @bot.command(name="boss_status")
 async def boss_status(ctx, name: str = None):
     now = datetime.now()
-    if name:
+    
+    if name:  # Single boss
         if name in bosses:
             boss = bosses[name]
             status = "Alive" if boss["death_time"] is None else "Dead"
@@ -103,10 +104,17 @@ async def boss_status(ctx, name: str = None):
             )
         else:
             await ctx.send(f"Boss '{name}' not found!")
-    else:
+
+    else:  # All bosses
+        if not bosses:
+            await ctx.send("No bosses added yet!")
+            return
+
+        message_lines = []
+        views = []
         for b_name, info in bosses.items():
             status = "Alive" if info["death_time"] is None else "Dead"
-            respawn_msg = ""
+            respawn_msg = "N/A"
             if info["death_time"]:
                 respawn_time = info["death_time"] + info["respawn_time"]
                 if now >= respawn_time:
@@ -118,9 +126,20 @@ async def boss_status(ctx, name: str = None):
                     minutes, seconds = divmod(remainder, 60)
                     respawn_msg = f"{hours}h {minutes}m {seconds}s"
 
-            view = BossDeathButton(b_name) if status == "Alive" else None
-            await ctx.send(f"{b_name} - {status} - Respawn In: {respawn_msg or 'N/A'}", view=view)
+            message_lines.append(f"{b_name} - {status} - Respawn In: {respawn_msg}")
+            if status == "Alive":
+                views.append(BossDeathButton(b_name))  # Collect alive boss buttons
 
+        view = None
+        if views:
+            # Create a single view with all buttons
+            view = View(timeout=None)
+            for v in views:
+                for child in v.children:
+                    view.add_item(child)
+
+        await ctx.send("\n".join(message_lines), view=view)
+        
 # Background task to announce respawns and 5-minute reminders
 @tasks.loop(seconds=30)
 async def check_boss_respawns():
