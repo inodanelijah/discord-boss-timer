@@ -25,7 +25,7 @@ import json
 import os
 
 # --- CONFIG ---
-TOKEN = "MTQxMzI0MTAwNTExNjg4MzA5OA.G1U8iU.8ZYLejoMhP8L_PiOhVPNkGO_8GRUiFVpdNCLgA"  # Replace with your bot token
+TOKEN = "MTQxMzI0MTAwNTExNjg4MzA5OA.GpyhkL.uaSYogKFGZlqoIhC1ufRfOMMWskFxivUuNrhfw"  # Replace with your bot token
 CHANNEL_ID = 1413127621214081158  # Replace with your channel ID
 DATA_FILE = "bosses.json"  # File to save boss timers
 
