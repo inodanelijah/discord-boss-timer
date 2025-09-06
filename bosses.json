@@ -1,19 +1,14 @@
 {
-    "Venatus": {
-        "tod": "04:16",
-        "hours": 10,
-        "type": "interval"
+    "Amentis": {
+        "spawn_time": null,
+        "death_time": "2025-09-07T09:31:51+08:00",
+        "respawn_hours": 26.75,
+        "killed_by": null
     },
-    "Viorent": {
-        "tod": "3:57",
-        "hours": 10,
-        "type": "interval"
-    },
-    "Clemantis": {
-        "type": "weekly",
-        "schedule": [
-            "Mon 11:30",
-            "Thu 19:00"
-        ]
+    "GeneralAquleus": {
+        "spawn_time": null,
+        "death_time": "2025-09-07T10:23:30+08:00",
+        "respawn_hours": 27.6,
+        "killed_by": null
     }
 }
