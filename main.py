@@ -110,8 +110,8 @@ class BossDeathButton(View):
 
 
 # --- Add a boss ---
-@bot.command(name="test_add")
-async def test_add(ctx, name: str, respawn_hours: float):
+@bot.command(name="boss_add")
+async def boss_add(ctx, name: str, respawn_hours: float):
     spawn_time = datetime.now(sg_timezone)
     bosses[name] = {
         "spawn_time": spawn_time,
@@ -232,12 +232,12 @@ async def boss_status(ctx, name: str = None):
     final_message = "```" + header + "\n".join(lines) + "```"
     await ctx.send(final_message)
 # --- Edit Time of Death ---
-@bot.command(name="test_tod_edit")
-async def test_tod_edit(ctx, name: str = None, *, new_time: str = None):
+@bot.command(name="boss_tod_edit")
+async def boss_tod_edit(ctx, name: str = None, *, new_time: str = None):
     if not name:
         await ctx.send(
-            "❌ **Usage:** `/test_tod_edit <boss_name> [MM-DD-YYYY HH:MM AM/PM]`\n"
-            "Example: `/test_tod_edit Clemantis 09-07-2025 02:30 PM`"
+            "❌ **Usage:** `/boss_tod_edit <boss_name> [MM-DD-YYYY HH:MM AM/PM]`\n"
+            "Example: `/boss_tod_edit Clemantis 09-07-2025 02:30 PM`"
         )
         return
 
@@ -269,10 +269,24 @@ async def test_tod_edit(ctx, name: str = None, *, new_time: str = None):
         f"✅ Time of Death for **{name}** updated to {death_time.strftime('%m-%d-%Y %I:%M %p')} by {ctx.author.mention}"
     )
 
+# --- Delete a Boss ---
+@bot.command(name="boss_delete")
+async def boss_delete(ctx, name: str):
+    if name not in bosses:
+        await ctx.send(f"❌ Boss '{name}' not found!")
+        return
+
+    # Remove from memory
+    del bosses[name]
+
+    # Save updated JSON
+    save_bosses()
+
+    await ctx.send(f"✅ Boss '{name}' has been deleted successfully!")
 
 # --- Clear all bosses (Admin) ---
-@bot.command(name="test_clear_adm")
-async def test_clear_adm(ctx):
+@bot.command(name="boss_clear_adm")
+async def boss_clear_adm(ctx):
     bosses.clear()
     reminder_sent.clear()
     if os.path.exists(DATA_FILE):
