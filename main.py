@@ -182,10 +182,19 @@ async def check_boss_respawns():
                 if name in reminder_sent:
                     reminder_sent.remove(name)
 
+
 # --- Bot ready event ---
 @bot.event
 async def on_ready():
     print(f"Bot logged in as {bot.user}")
+
+    # --- TEMP: REMOVE ALL GLOBAL SLASH COMMANDS ---
+    bot.tree.clear_commands(guild=None)  # Clear globally
+    await bot.tree.sync()  # Push the changes
+    print("All old slash commands have been cleared!")
+
+    # Start your background task after clearing
     check_boss_respawns.start()
+
 
 bot.run(TOKEN)
