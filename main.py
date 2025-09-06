@@ -62,15 +62,25 @@ def load_bosses():
         return
     with open(DATA_FILE, "r") as f:
         data = json.load(f)
+
     for name, info in data.items():
+        killed_by = info.get("killed_by")
+
+        # --- Auto-convert old "<@ID>" format to raw ID ---
+        if isinstance(killed_by, str):
+            if killed_by.startswith("<@") and killed_by.endswith(">"):
+                killed_by = killed_by.strip("<@>")
+            try:
+                killed_by = int(killed_by)
+            except ValueError:
+                killed_by = None
+
         bosses[name] = {
-            "spawn_time": datetime.fromisoformat(info["spawn_time"]) if info["spawn_time"] else None,
-            "death_time": datetime.fromisoformat(info["death_time"]) if info["death_time"] else None,
-            "respawn_time": timedelta(hours=info["respawn_hours"]),
-            "killed_by": info.get("killed_by")
+            "spawn_time": datetime.fromisoformat(info["spawn_time"]) if info.get("spawn_time") else None,
+            "death_time": datetime.fromisoformat(info["death_time"]) if info.get("death_time") else None,
+            "respawn_time": timedelta(hours=info.get("respawn_hours", 0)),
+            "killed_by": killed_by
         }
-
-
 # --- Button for Time of Death ---
 class BossDeathButton(View):
     def __init__(self, boss_name: str):
@@ -100,7 +110,7 @@ class BossDeathButton(View):
 
 
 # --- Add a boss ---
-@bot.command(name="boss_add")
+@bot.command(name="test_add")
 async def test_add(ctx, name: str, respawn_hours: float):
     spawn_time = datetime.now(sg_timezone)
     bosses[name] = {
@@ -114,78 +124,115 @@ async def test_add(ctx, name: str, respawn_hours: float):
     await ctx.send(f"Boss '{name}' added! Respawn time: {respawn_hours} hours.", view=view)
 
 
-# --- Boss status ---
+# --- Helper: Get Marked By Username ---
+async def get_marked_by_display(user_id, guild):
+    if not user_id:
+        return "N/A"
+
+    # Handle both string "<@ID>" and integer ID
+    if isinstance(user_id, str):
+        # Extract integer from "<@1234567890>"
+        import re
+        match = re.search(r'\d+', user_id)
+        if match:
+            user_id = int(match.group(0))
+        else:
+            return user_id  # fallback to raw string if no digits
+
+    try:
+        member = guild.get_member(user_id)
+        if member:
+            return member.display_name  # nickname if available
+        else:
+            user = await guild.fetch_member(user_id)  # fallback
+            return user.display_name
+    except:
+        try:
+            user = await bot.fetch_user(user_id)  # global fallback
+            return user.name
+        except:
+            return str(user_id)  # last resort
+
+# --- Boss Status Command ---
 @bot.command(name="boss_status")
-async def test_status(ctx, name: str = None):
+async def boss_status(ctx, name: str = None):
     now = datetime.now(sg_timezone)
 
+    # --- Single boss view ---
     if name:
-        if name not in bosses:
-            await ctx.send(f"Boss '{name}' not found!")
+        boss = bosses.get(name)
+        if not boss:
+            await ctx.send(f"❌ Boss '{name}' not found.")
             return
 
-        boss = bosses[name]
-        status = "Alive" if boss["death_time"] is None else "Dead"
-        respawn_msg = "N/A"
-        exact_respawn_time = "N/A"
+        death_time = boss.get("death_time")
+        if isinstance(death_time, str):
+            death_time = datetime.fromisoformat(death_time)
 
-        if boss["death_time"]:
-            respawn_time = boss["death_time"] + boss["respawn_time"]
-            if now >= respawn_time:
-                status = "Alive"
-                boss["death_time"] = None
+        respawn_duration = boss.get("respawn_time", timedelta())
+        if death_time:
+            respawn_at = death_time + respawn_duration
+            remaining = respawn_at - now
+            if remaining.total_seconds() > 0:
+                status = "Dead"
+                respawn_in = f"{int(remaining.total_seconds()//3600)}h {(int(remaining.total_seconds())%3600)//60}m {int(remaining.total_seconds()%60)}s"
             else:
-                remaining = respawn_time - now
-                hours, remainder = divmod(int(remaining.total_seconds()), 3600)
-                minutes, seconds = divmod(remainder, 60)
-                respawn_msg = f"{hours}h {minutes}m {seconds}s"
-                exact_respawn_time = respawn_time.strftime('%m-%d-%Y %I:%M %p')
+                status = "Alive"
+                respawn_in = "0h 0m 0s"
+        else:
+            status = "Alive"
+            respawn_in = "N/A"
+            respawn_at = now
 
-        view = BossDeathButton(name) if status == "Alive" else None
+        marked_by = await get_marked_by_display(boss.get("killed_by"), ctx.guild)
 
-        killed_by_msg = f"Marked by: {boss['killed_by']}" if boss.get("killed_by") else ""
-
-        await ctx.send(
-            f"{name} - Status: {status}\n"
-            f"Spawn Time: {boss['spawn_time'].strftime('%m-%d-%Y %I:%M %p')}\n"
-            f"Death Time: {boss['death_time'].strftime('%m-%d-%Y %I:%M %p') if boss['death_time'] else 'N/A'}\n"
-            f"{killed_by_msg}\n"
-            f"Respawn In: {respawn_msg}\n"
-            f"Respawn At: {exact_respawn_time}",
-            view=view
+        message = (
+            f"**Boss:** {name}\n"
+            f"**Status:** {status}\n"
+            f"**Respawn In:** {respawn_in}\n"
+            f"**Respawn At:** {respawn_at.strftime('%m-%d-%Y %I:%M %p')}\n"
+            f"**Marked By:** {marked_by}"
         )
-    else:
-        if not bosses:
-            await ctx.send("No bosses added yet!")
-            return
 
-        message_lines = []
-        for b_name, info in bosses.items():
-            status = "Alive" if info["death_time"] is None else "Dead"
-            respawn_msg = "N/A"
-            exact_respawn_time = "N/A"
+        view = BossDeathButton(name)
+        await ctx.send(message, view=view)
+        return
 
-            if info["death_time"]:
-                respawn_time = info["death_time"] + info["respawn_time"]
-                if now >= respawn_time:
-                    status = "Alive"
-                    info["death_time"] = None
-                else:
-                    remaining = respawn_time - now
-                    hours, remainder = divmod(int(remaining.total_seconds()), 3600)
-                    minutes, seconds = divmod(remainder, 60)
-                    respawn_msg = f"{hours}h {minutes}m {seconds}s"
-                    exact_respawn_time = respawn_time.strftime('%m-%d-%Y %I:%M %p')
+    # --- Full list view (no buttons) ---
+    header = f"{'Boss Name':<15}{'Status':<10}{'Respawn In':<15}{'Respawn At':<15}{'Marked By':<15}\n"
+    header += "-" * 70 + "\n"
 
-            message_lines.append(
-                f"{b_name} - {status} - Respawn In: {respawn_msg} - Respawn At: {exact_respawn_time}"
-            )
+    lines = []
+    for boss_name, info in bosses.items():
+        death_time = info.get("death_time")
+        if isinstance(death_time, str):
+            death_time = datetime.fromisoformat(death_time)
 
-        await ctx.send("\n".join(message_lines))
+        respawn_duration = info.get("respawn_time", timedelta())
+        if death_time:
+            respawn_at = death_time + respawn_duration
+            remaining = respawn_at - now
+            if remaining.total_seconds() > 0:
+                status = "Dead"
+                respawn_in = f"{int(remaining.total_seconds()//3600)}h {(int(remaining.total_seconds())%3600)//60}m {int(remaining.total_seconds()%60)}s"
+            else:
+                status = "Alive"
+                respawn_in = "0h 0m 0s"
+        else:
+            status = "Alive"
+            respawn_in = "N/A"
+            respawn_at = now
 
+        marked_by = await get_marked_by_display(info.get("killed_by"), ctx.guild)
+        lines.append(
+            f"{boss_name:<15}{status:<10}{respawn_in:<15}"
+            f"{respawn_at.strftime('%I:%M:%S %p'):<15}{marked_by:<15}"
+        )
 
+    final_message = "```" + header + "\n".join(lines) + "```"
+    await ctx.send(final_message)
 # --- Edit Time of Death ---
-@bot.command(name="boss_tod_edit")
+@bot.command(name="test_tod_edit")
 async def test_tod_edit(ctx, name: str = None, *, new_time: str = None):
     if not name:
         await ctx.send(
@@ -224,7 +271,7 @@ async def test_tod_edit(ctx, name: str = None, *, new_time: str = None):
 
 
 # --- Clear all bosses (Admin) ---
-@bot.command(name="boss_clear_adm")
+@bot.command(name="test_clear_adm")
 async def test_clear_adm(ctx):
     bosses.clear()
     reminder_sent.clear()
