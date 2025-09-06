@@ -1,4 +1,5 @@
 ﻿discord.py
 python-dotenv
 flask
+pytz
 
