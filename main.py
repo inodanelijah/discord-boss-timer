@@ -21,6 +21,7 @@ from discord.ext import commands, tasks
 from discord.ui import View, Button
 #from datetime import datetime, timedelta, UTC
 from datetime import datetime, timedelta, UTC
+from zoneinfo import ZoneInfo  # <-- ADD THIS
 import json
 import os
 
@@ -46,7 +47,7 @@ class BossDeathButton(discord.ui.View):
     @discord.ui.button(label="Time of Death", style=discord.ButtonStyle.red)
     async def death_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.boss_name in bosses:
-            now = datetime.now()
+            now = datetime.now(tz=ZoneInfo("Asia/Singapore"))
             bosses[self.boss_name]["death_time"] = now
             respawn_time = now + bosses[self.boss_name]["respawn_time"]
             if self.boss_name in reminder_sent:
@@ -75,7 +76,7 @@ async def boss_add(ctx, name: str, respawn_hours: float):
 # --- Check boss status ---
 @bot.command(name="boss_status")
 async def boss_status(ctx, name: str = None):
-    now = datetime.now()
+    now = datetime.now(tz=ZoneInfo("Asia/Singapore"))
 
     if name:
         # Single boss status
@@ -161,7 +162,7 @@ async def boss_clear(ctx):
 # --- Background task for respawns and 5-min reminders ---
 @tasks.loop(seconds=30)
 async def check_boss_respawns():
-    now = datetime.now()
+    now = datetime.now(tz=ZoneInfo("Asia/Singapore"))
     for name, info in bosses.items():
         if info["death_time"]:
             respawn_time = info["death_time"] + info["respawn_time"]
