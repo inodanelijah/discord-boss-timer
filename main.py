@@ -56,7 +56,7 @@ def save_bosses():
         json.dump(data, f, indent=4)
 
 
-# --- Helper: Load bosses from JSON ---
+# --- Helper: Load bosses from JSON and auto-sync ---
 def load_bosses():
     if not os.path.exists(DATA_FILE):
         return
@@ -66,7 +66,7 @@ def load_bosses():
     for name, info in data.items():
         killed_by = info.get("killed_by")
 
-        # --- Auto-convert old "<@ID>" format to raw ID ---
+        # Convert killed_by string to ID if needed
         if isinstance(killed_by, str):
             if killed_by.startswith("<@") and killed_by.endswith(">"):
                 killed_by = killed_by.strip("<@>")
@@ -75,12 +75,25 @@ def load_bosses():
             except ValueError:
                 killed_by = None
 
+        death_time = datetime.fromisoformat(info["death_time"]) if info.get("death_time") else None
+        respawn_time = timedelta(hours=info.get("respawn_hours", 0))
+
+        # Auto-sync: Reset death_time if boss should have respawned
+        if death_time and datetime.now(sg_timezone) >= death_time + respawn_time:
+            death_time = None
+            killed_by = None
+
         bosses[name] = {
             "spawn_time": datetime.fromisoformat(info["spawn_time"]) if info.get("spawn_time") else None,
-            "death_time": datetime.fromisoformat(info["death_time"]) if info.get("death_time") else None,
-            "respawn_time": timedelta(hours=info.get("respawn_hours", 0)),
+            "death_time": death_time,
+            "respawn_time": respawn_time,
             "killed_by": killed_by
         }
+
+    # Save back to JSON to keep it in sync
+    save_bosses()
+
+
 # --- Button for Time of Death ---
 class BossDeathButton(View):
     def __init__(self, boss_name: str):
@@ -92,7 +105,7 @@ class BossDeathButton(View):
         if self.boss_name in bosses:
             now = datetime.now(sg_timezone)
             bosses[self.boss_name]["death_time"] = now
-            bosses[self.boss_name]["killed_by"] = interaction.user.mention
+            bosses[self.boss_name]["killed_by"] = interaction.user.id
             save_bosses()
 
             respawn_time = now + bosses[self.boss_name]["respawn_time"]
@@ -100,8 +113,6 @@ class BossDeathButton(View):
                 f"Boss '{self.boss_name}' marked dead by {interaction.user.mention} at {now.strftime('%m-%d-%Y %I:%M %p')}.\n"
                 f"Respawns at: {respawn_time.strftime('%m-%d-%Y %I:%M %p')} "
                 f"(in {bosses[self.boss_name]['respawn_time']})"
-                f"(hours)",
-
             )
 
             await interaction.message.edit(view=None)
@@ -128,35 +139,39 @@ async def boss_add(ctx, name: str, respawn_hours: float):
 async def get_marked_by_display(user_id, guild):
     if not user_id:
         return "N/A"
-
-    # Handle both string "<@ID>" and integer ID
     if isinstance(user_id, str):
-        # Extract integer from "<@1234567890>"
         import re
         match = re.search(r'\d+', user_id)
         if match:
             user_id = int(match.group(0))
         else:
-            return user_id  # fallback to raw string if no digits
-
+            return user_id
     try:
         member = guild.get_member(user_id)
         if member:
-            return member.display_name  # nickname if available
+            return member.display_name
         else:
-            user = await guild.fetch_member(user_id)  # fallback
+            user = await guild.fetch_member(user_id)
             return user.display_name
     except:
         try:
-            user = await bot.fetch_user(user_id)  # global fallback
+            user = await bot.fetch_user(user_id)
             return user.name
         except:
-            return str(user_id)  # last resort
+            return str(user_id)
+
 
 # --- Boss Status Command ---
 @bot.command(name="boss_status")
 async def boss_status(ctx, name: str = None):
     now = datetime.now(sg_timezone)
+
+    # Auto-sync bosses on status check
+    for boss in bosses.values():
+        if boss.get("death_time") and now >= boss["death_time"] + boss["respawn_time"]:
+            boss["death_time"] = None
+            boss["killed_by"] = None
+    save_bosses()
 
     # --- Single boss view ---
     if name:
@@ -166,9 +181,6 @@ async def boss_status(ctx, name: str = None):
             return
 
         death_time = boss.get("death_time")
-        if isinstance(death_time, str):
-            death_time = datetime.fromisoformat(death_time)
-
         respawn_duration = boss.get("respawn_time", timedelta())
         if death_time:
             respawn_at = death_time + respawn_duration
@@ -198,16 +210,13 @@ async def boss_status(ctx, name: str = None):
         await ctx.send(message, view=view)
         return
 
-    # --- Full list view (no buttons) ---
+    # --- Full list view ---
     header = f"{'Boss Name':<15}{'Status':<10}{'Respawn In':<15}{'Respawn At':<15}{'Marked By':<15}\n"
     header += "-" * 70 + "\n"
 
     lines = []
     for boss_name, info in bosses.items():
         death_time = info.get("death_time")
-        if isinstance(death_time, str):
-            death_time = datetime.fromisoformat(death_time)
-
         respawn_duration = info.get("respawn_time", timedelta())
         if death_time:
             respawn_at = death_time + respawn_duration
@@ -231,6 +240,8 @@ async def boss_status(ctx, name: str = None):
 
     final_message = "```" + header + "\n".join(lines) + "```"
     await ctx.send(final_message)
+
+
 # --- Edit Time of Death ---
 @bot.command(name="boss_tod_edit")
 async def boss_tod_edit(ctx, name: str = None, *, new_time: str = None):
@@ -245,34 +256,26 @@ async def boss_tod_edit(ctx, name: str = None, *, new_time: str = None):
         await ctx.send(f"❌ Boss '{name}' not found.")
         return
 
-    # Parse new time or use current time
     if new_time:
         try:
             naive_dt = datetime.strptime(new_time, "%m-%d-%Y %I:%M %p")
             death_time = sg_timezone.localize(naive_dt)
         except ValueError:
-            await ctx.send(
-                "❌ Invalid time format! Use: `MM-DD-YYYY HH:MM AM/PM`\n"
-                "Example: `09-07-2025 02:30 PM`"
-            )
+            await ctx.send("❌ Invalid time format! Use: `MM-DD-YYYY HH:MM AM/PM`")
             return
     else:
         death_time = datetime.now(sg_timezone)
 
-    # --- FIX: Store as datetime but ensure save_bosses() converts it ---
     bosses[name]["death_time"] = death_time
-    bosses[name]["killed_by"] = ctx.author.id  # store as ID, not mention
-
-    # Remove unused "next_respawn" (not needed, always recomputed)
-    if "next_respawn" in bosses[name]:
-        bosses[name].pop("next_respawn")
-
-    save_bosses()  # <-- This now properly saves after TOD edit
+    bosses[name]["killed_by"] = ctx.author.id
+    save_bosses()
 
     await ctx.send(
         f"✅ Time of Death for **{name}** updated to "
         f"{death_time.strftime('%m-%d-%Y %I:%M %p')} by {ctx.author.mention}"
     )
+
+
 # --- Delete a Boss ---
 @bot.command(name="boss_delete")
 async def boss_delete(ctx, name: str):
@@ -280,13 +283,10 @@ async def boss_delete(ctx, name: str):
         await ctx.send(f"❌ Boss '{name}' not found!")
         return
 
-    # Remove from memory
     del bosses[name]
-
-    # Save updated JSON
     save_bosses()
-
     await ctx.send(f"✅ Boss '{name}' has been deleted successfully!")
+
 
 # --- Clear all bosses (Admin) ---
 @bot.command(name="boss_clear_adm")
