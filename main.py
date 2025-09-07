@@ -30,7 +30,7 @@ from discord.ui import View, Button
 # --- CONFIG ---
 TOKEN = "MTQxMzI0MTAwNTExNjg4MzA5OA.GpyhkL.uaSYogKFGZlqoIhC1ufRfOMMWskFxivUuNrhfw"  # Replace with your bot token
 CHANNEL_ID = 1413785757990260836  # Replace with your channel ID
-DATA_FILE = "/data/bosses.json"  # File to save boss timers
+# DATA_FILE = "/data/bosses.json"  # File to save boss timers
 DATA_FILE = "bosses.json"  # File to save boss timers
 
 sg_timezone = pytz.timezone("Asia/Singapore")
@@ -67,7 +67,7 @@ async def save_bosses():
             }
             for name, info in bosses.items()
         }
-        os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
+        # No need to create directories, just write in current folder
         with open(DATA_FILE, "w") as f:
             json.dump(data, f, indent=4)
 
