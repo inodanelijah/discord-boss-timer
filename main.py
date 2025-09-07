@@ -194,7 +194,7 @@ async def boss_status(ctx, name: str = None):
             f"**Marked By:** {marked_by}"
         )
 
-        view = BossDeathButton(name)
+        view = BossDeathButton(name) if status == "Alive" else None
         await ctx.send(message, view=view)
         return
 
