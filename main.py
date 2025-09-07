@@ -30,6 +30,7 @@ from discord.ui import View, Button
 # --- CONFIG ---
 TOKEN = "MTQxMzI0MTAwNTExNjg4MzA5OA.GpyhkL.uaSYogKFGZlqoIhC1ufRfOMMWskFxivUuNrhfw"  # Replace with your bot token
 CHANNEL_ID = 1413785757990260836  # Replace with your channel ID
+DATA_FILE = "/data/bosses.json"  # File to save boss timers
 DATA_FILE = "bosses.json"  # File to save boss timers
 
 sg_timezone = pytz.timezone("Asia/Singapore")
