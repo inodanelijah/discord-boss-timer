@@ -1,14 +1,1 @@
-{
-    "Amentis": {
-        "spawn_time": null,
-        "death_time": "2025-09-07T09:31:51+08:00",
-        "respawn_hours": 26.75,
-        "killed_by": "<@879460969967931402>"
-    },
-    "GeneralAquleus": {
-        "spawn_time": null,
-        "death_time": "2025-09-07T10:23:30+08:00",
-        "respawn_hours": 27.6,
-        "killed_by": "<@879460969967931402>"
-    }
-}
+{ }
