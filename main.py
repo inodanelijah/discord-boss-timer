@@ -245,6 +245,7 @@ async def boss_tod_edit(ctx, name: str = None, *, new_time: str = None):
         await ctx.send(f"❌ Boss '{name}' not found.")
         return
 
+    # Parse new time or use current time
     if new_time:
         try:
             naive_dt = datetime.strptime(new_time, "%m-%d-%Y %I:%M %p")
@@ -258,17 +259,20 @@ async def boss_tod_edit(ctx, name: str = None, *, new_time: str = None):
     else:
         death_time = datetime.now(sg_timezone)
 
+    # --- FIX: Store as datetime but ensure save_bosses() converts it ---
     bosses[name]["death_time"] = death_time
-    bosses[name]["killed_by"] = ctx.author.mention
+    bosses[name]["killed_by"] = ctx.author.id  # store as ID, not mention
 
-    respawn_time = death_time + bosses[name]["respawn_time"]
-    bosses[name]["next_respawn"] = respawn_time.isoformat()
-    save_bosses()
+    # Remove unused "next_respawn" (not needed, always recomputed)
+    if "next_respawn" in bosses[name]:
+        bosses[name].pop("next_respawn")
+
+    save_bosses()  # <-- This now properly saves after TOD edit
 
     await ctx.send(
-        f"✅ Time of Death for **{name}** updated to {death_time.strftime('%m-%d-%Y %I:%M %p')} by {ctx.author.mention}"
+        f"✅ Time of Death for **{name}** updated to "
+        f"{death_time.strftime('%m-%d-%Y %I:%M %p')} by {ctx.author.mention}"
     )
-
 # --- Delete a Boss ---
 @bot.command(name="boss_delete")
 async def boss_delete(ctx, name: str):
