@@ -247,7 +247,7 @@ async def boss_delete(ctx, name: str):
     await save_bosses()
     await ctx.send(f"✅ Boss '{name}' has been deleted successfully!")
 
-@bot.command(name="test_clear_adm")
+@bot.command(name="boss_clear_adm")
 async def boss_clear_adm(ctx):
     bosses.clear()
     reminder_sent.clear()
@@ -307,18 +307,22 @@ async def check_boss_respawns():
             if not channel:
                 continue
 
-            # 5-minute reminder
+            # 5-minute reminder with @everyone
             if 0 < (respawn_time - now).total_seconds() <= 300:
                 if name not in reminder_sent:
-                    await channel.send(f"Reminder: Boss '{name}' will respawn in 5 minutes!")
+                    await channel.send(f"@everyone Reminder: Boss '{name}' will respawn in 5 minutes!")
                     reminder_sent.add(name)
 
-            # Boss respawned
+            # Boss respawned with @everyone + Time of Death button
             if now >= respawn_time:
-                await channel.send(f"Boss '{name}' has respawned!")
+                view = BossDeathButton(name)
+                await channel.send(f"@everyone Boss '{name}' has respawned!", view=view)
+
+                # Reset death and killer info
                 info["death_time"] = None
                 info["killed_by"] = None
                 await save_bosses()
+
                 if name in reminder_sent:
                     reminder_sent.remove(name)
 
@@ -328,6 +332,118 @@ async def on_ready():
     print(f"Bot logged in as {bot.user}")
     load_bosses()
     check_boss_respawns.start()
+
+# -------------------------------------------------------------------------------------------------------- #
+# --- ATTENDANCE FEATURE ---
+attendance_data = {
+    "active": False,
+    "created_by": None,
+    "attendees": [],
+    "message_id": None,
+    "channel_id": None
+}
+
+class AttendanceView(View):
+    def __init__(self, author_id):
+        super().__init__(timeout=None)
+        self.author_id = author_id
+
+    @discord.ui.button(label="Join", style=discord.ButtonStyle.green)
+    async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not attendance_data["active"]:
+            await interaction.response.send_message("❌ Attendance is closed.", ephemeral=True)
+            return
+
+        user_id = interaction.user.id
+        if user_id not in attendance_data["attendees"]:
+            attendance_data["attendees"].append(user_id)
+            await save_attendance()
+            await update_attendance_message(interaction.guild)
+            await interaction.response.send_message("✅ You joined the attendance!", ephemeral=True)
+        else:
+            await interaction.response.send_message("You are already in the attendance list!", ephemeral=True)
+
+    @discord.ui.button(label="Close Attendance", style=discord.ButtonStyle.red)
+    async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Only the creator can close the attendance.", ephemeral=True)
+            return
+
+        attendance_data["active"] = False
+        await save_attendance()
+        await update_attendance_message(interaction.guild, closed=True)
+        await interaction.response.send_message("✅ Attendance has been closed!", ephemeral=True)
+
+
+async def save_attendance():
+    async with json_lock:
+        data = {}
+        if os.path.exists(DATA_FILE):
+            with open(DATA_FILE, "r") as f:
+                data = json.load(f)
+        data["attendance"] = attendance_data
+        with open(DATA_FILE, "w") as f:
+            json.dump(data, f, indent=4)
+
+def load_attendance():
+    if not os.path.exists(DATA_FILE):
+        return
+    with open(DATA_FILE, "r") as f:
+        data = json.load(f)
+    if "attendance" in data:
+        global attendance_data
+        attendance_data.update(data["attendance"])
+
+async def update_attendance_message(guild, closed=False):
+    """Updates the attendance embed message."""
+    channel = guild.get_channel(attendance_data["channel_id"])
+    if not channel:
+        return
+
+    try:
+        msg = await channel.fetch_message(attendance_data["message_id"])
+    except:
+        return
+
+    members_list = []
+    for uid in attendance_data["attendees"]:
+        name = await get_marked_by_display(uid, guild)
+        members_list.append(f"- {name}")
+
+    attendees_text = "\n".join(members_list) if members_list else "No attendees yet."
+
+    embed = discord.Embed(
+        title="📋 Guild Attendance",
+        description=f"Created by: <@{attendance_data['created_by']}>\n\n**Attendees:**\n{attendees_text}",
+        color=discord.Color.green() if attendance_data["active"] else discord.Color.red()
+    )
+
+    await msg.edit(embed=embed, view=None if closed else AttendanceView(attendance_data["created_by"]))
+
+@bot.command(name="guild_attendance")
+async def guild_attendance(ctx):
+    if attendance_data["active"]:
+        await ctx.send("❌ There is already an active attendance! Close it first before starting a new one.")
+        return
+
+    attendance_data.update({
+        "active": True,
+        "created_by": ctx.author.id,
+        "attendees": [],
+        "message_id": None,
+        "channel_id": ctx.channel.id
+    })
+    await save_attendance()
+
+    embed = discord.Embed(
+        title="📋 Guild Attendance",
+        description=f"Created by: {ctx.author.mention}\n\n**Attendees:**\nNo attendees yet.",
+        color=discord.Color.green()
+    )
+    msg = await ctx.send(embed=embed, view=AttendanceView(ctx.author.id))
+
+    attendance_data["message_id"] = msg.id
+    await save_attendance()
 
 # --- RUN BOT ---
 bot.run(TOKEN)
