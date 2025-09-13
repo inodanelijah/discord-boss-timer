@@ -19,20 +19,18 @@ Thread(target=run_server).start()
 import os
 import json
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 import pytz
 from threading import Thread
 import discord
 from discord.ext import commands, tasks
 from discord.ui import View, Button
-
-
+import re
 # --- CONFIG ---
-TOKEN = "MTQxMzI0MTAwNTExNjg4MzA5OA.GpyhkL.uaSYogKFGZlqoIhC1ufRfOMMWskFxivUuNrhfw"  # Replace with your bot token
-CHANNEL_ID = 1413785757990260836  # Replace with your channel ID
-# DATA_FILE = "/data/bosses.json"  # File to save boss timers
-DATA_FILE = "bosses.json"  # File to save boss timers
-
+TOKEN = "MTQxMzI0MTAwNTExNjg4MzA5OA.GpyhkL.uaSYogKFGZlqoIhC1ufRfOMMWskFxivUuNrhfw"
+CHANNEL_ID = 1413785757990260836
+DATA_FILE = "bosses.json"
+status_channel_id = 1416452770017317034
 sg_timezone = pytz.timezone("Asia/Singapore")
 
 # --- BOT SETUP ---
@@ -40,21 +38,25 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='/', intents=intents)
 
-# --- DATA STRUCTURES ---
+# --- DATA ---
 bosses = {}
 reminder_sent = set()
 json_lock = asyncio.Lock()
+status_messages = []  # Store message objects for editing
 
 
-# --- HELPER FUNCTIONS ---
+# --- FIXED HELPERS (with null handling) ---
 def parse_datetime(dt_str):
-    if not dt_str:
+    if not dt_str or dt_str == "null" or dt_str is None:
         return None
-    dt = datetime.fromisoformat(dt_str)
-    # Only localize if naive
-    if dt.tzinfo is None:
-        dt = sg_timezone.localize(dt)
-    return dt
+    try:
+        dt = datetime.fromisoformat(dt_str)
+        if dt.tzinfo is None:
+            dt = sg_timezone.localize(dt)
+        return dt
+    except (ValueError, TypeError):
+        return None
+
 
 async def save_bosses():
     async with json_lock:
@@ -63,168 +65,330 @@ async def save_bosses():
                 "spawn_time": info["spawn_time"].isoformat() if info.get("spawn_time") else None,
                 "death_time": info["death_time"].isoformat() if info.get("death_time") else None,
                 "respawn_hours": info["respawn_time"].total_seconds() / 3600,
-                "killed_by": info.get("killed_by")
+                "killed_by": info.get("killed_by"),
+                "schedule": info.get("schedule", []),
+                "is_scheduled": info.get("is_scheduled", False),
+                "is_daily": info.get("is_daily", False)
             }
             for name, info in bosses.items()
         }
-        # No need to create directories, just write in current folder
         with open(DATA_FILE, "w") as f:
             json.dump(data, f, indent=4)
 
-def save_bosses_sync():
-    asyncio.create_task(save_bosses())
 
 def load_bosses():
     if not os.path.exists(DATA_FILE):
         return
     with open(DATA_FILE, "r") as f:
         data = json.load(f)
-
     for name, info in data.items():
         bosses[name] = {
             "spawn_time": parse_datetime(info.get("spawn_time")),
             "death_time": parse_datetime(info.get("death_time")),
             "respawn_time": timedelta(hours=info.get("respawn_hours", 0)),
-            "killed_by": info.get("killed_by")
+            "killed_by": info.get("killed_by"),
+            "schedule": info.get("schedule", []),
+            "is_scheduled": info.get("is_scheduled", False),
+            "is_daily": info.get("is_daily", False)
         }
 
-# --- DISCORD BOT SETUP ---
-intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True  # Needed for "marked_by" display
+# --- FIXED EMBED REFRESH ---
+# --- FIXED EMBED REFRESH ---
+async def refresh_status_message():
+    global status_messages
 
-bot = commands.Bot(command_prefix='/', intents=intents)
-
-# --- BUTTON FOR TIME OF DEATH ---
-class BossDeathButton(View):
-    def __init__(self, boss_name: str):
-        super().__init__(timeout=None)
-        self.boss_name = boss_name
-
-    @discord.ui.button(label="Time of Death", style=discord.ButtonStyle.red)
-    async def death_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.boss_name in bosses:
-            now = datetime.now(sg_timezone)
-            bosses[self.boss_name]["death_time"] = now
-            bosses[self.boss_name]["killed_by"] = interaction.user.id
-            await save_bosses()
-
-            respawn_time = now + bosses[self.boss_name]["respawn_time"]
-            await interaction.response.send_message(
-                f"Boss '{self.boss_name}' marked dead by {interaction.user.mention} at {now.strftime('%m-%d-%Y %I:%M %p')}.\n"
-                f"Respawns at: {respawn_time.strftime('%m-%d-%Y %I:%M %p')} "
-                f"(in {bosses[self.boss_name]['respawn_time']})"
-            )
-            await interaction.message.edit(view=None)
-        else:
-            await interaction.response.send_message(f"Boss '{self.boss_name}' not found!", ephemeral=True)
-
-# --- HELPER: Get Marked By Username ---
-async def get_marked_by_display(user_id, guild):
-    if not user_id:
-        return "N/A"
-    if isinstance(user_id, str):
-        import re
-        match = re.search(r'\d+', user_id)
-        if match:
-            user_id = int(match.group(0))
-        else:
-            return user_id
-    try:
-        member = guild.get_member(user_id)
-        if member:
-            return member.display_name
-        else:
-            user = await guild.fetch_member(user_id)
-            return user.display_name
-    except:
-        try:
-            user = await bot.fetch_user(user_id)
-            return user.name
-        except:
-            return str(user_id)
-
-# --- BOSS COMMANDS ---
-
-@bot.command(name="boss_status")
-async def boss_status(ctx, name: str = None):
-    now = datetime.now(sg_timezone)
-
-    # Auto-sync bosses on status check
-    for boss in bosses.values():
-        if boss.get("death_time") and now >= boss["death_time"] + boss["respawn_time"]:
-            boss["death_time"] = None
-            boss["killed_by"] = None
-    await save_bosses()
-
-    # --- Single boss view ---
-    if name:
-        boss = bosses.get(name)
-        if not boss:
-            await ctx.send(f"❌ Boss '{name}' not found.")
-            return
-
-        death_time = boss.get("death_time")
-        respawn_duration = boss.get("respawn_time", timedelta())
-        if death_time:
-            respawn_at = death_time + respawn_duration
-            remaining = respawn_at - now
-            if remaining.total_seconds() > 0:
-                status = "Dead"
-                respawn_in = f"{int(remaining.total_seconds()//3600)}h {(int(remaining.total_seconds()%3600)//60)}m {int(remaining.total_seconds()%60)}s"
-            else:
-                status = "Alive"
-                respawn_in = "0h 0m 0s"
-        else:
-            status = "Alive"
-            respawn_in = "N/A"
-            respawn_at = now
-
-        marked_by = await get_marked_by_display(boss.get("killed_by"), ctx.guild)
-
-        message = (
-            f"**Boss:** {name}\n"
-            f"**Status:** {status}\n"
-            f"**Respawn In:** {respawn_in}\n"
-            f"**Respawn At:** {respawn_at.strftime('%m-%d-%Y %I:%M %p')}\n"
-            f"**Marked By:** {marked_by}"
-        )
-
-        view = BossDeathButton(name) if status == "Alive" else None
-        await ctx.send(message, view=view)
+    ch = bot.get_channel(status_channel_id)
+    if ch is None:
+        print("⚠️ Status channel not found!")
         return
 
-    # --- Full list view ---
-    header = f"{'Boss Name':<15}{'Status':<10}{'Respawn In':<15}{'Respawn At':<15}{'Marked By':<15}\n"
-    header += "-" * 70 + "\n"
+    embeds = boss_status_embeds()
 
-    lines = []
+    # If we have no existing messages, create new ones
+    if not status_messages:
+        # Clean up old bot messages first
+        try:
+            async for msg in ch.history(limit=50):
+                if msg.author == bot.user:
+                    try:
+                        await msg.delete()
+                    except:
+                        pass
+        except:
+            pass
+
+        # Send new messages with delays to avoid rate limits
+        status_messages = []
+        for i, em in enumerate(embeds):
+            try:
+                msg = await ch.send(embed=em)
+                status_messages.append(msg)
+                # Add a small delay between message creations
+                if i < len(embeds) - 1:
+                    await asyncio.sleep(1)
+            except Exception as e:
+                print(f"Error sending message: {e}")
+        print("✅ Boss timer embeds created.")
+        return
+
+    # If we have existing messages, edit them with rate limit handling
+    if len(status_messages) == len(embeds):
+        for i, msg in enumerate(status_messages):
+            try:
+                await msg.edit(embed=embeds[i])
+                # Add a small delay between edits to avoid rate limits
+                if i < len(status_messages) - 1:
+                    await asyncio.sleep(1)
+            except discord.NotFound:
+                # Message was deleted, need to recreate
+                status_messages = []
+                await refresh_status_message()
+                return
+            except discord.HTTPException as e:
+                if e.status == 429:  # Rate limited
+                    retry_after = e.retry_after
+                    print(f"Rate limited. Retrying in {retry_after} seconds.")
+                    await asyncio.sleep(retry_after)
+                    await msg.edit(embed=embeds[i])
+                else:
+                    print(f"Error editing message: {e}")
+            except Exception as e:
+                print(f"Error editing message: {e}")
+    else:
+        # Number of embeds changed, recreate all messages
+        try:
+            # Delete old messages
+            for msg in status_messages:
+                try:
+                    await msg.delete()
+                except:
+                    pass
+        except:
+            pass
+
+        status_messages = []
+        for i, em in enumerate(embeds):
+            try:
+                msg = await ch.send(embed=em)
+                status_messages.append(msg)
+                # Add a small delay between message creations
+                if i < len(embeds) - 1:
+                    await asyncio.sleep(1)
+            except Exception as e:
+                print(f"Error sending message: {e}")
+
+    print("✅ Boss timer embeds refreshed.")
+
+# --- EMBED BUILDER WITH SORTING ---
+# --- EMBED BUILDER WITH SORTING ---
+def boss_status_embeds():
+    now = datetime.now(sg_timezone)
+
+    # Create lists to store bosses for each category
+    today_bosses = []
+    other_bosses = []
+    alive_bosses = []
+    scheduled_bosses = []  # For scheduled bosses that are not spawning soon
+
+    # Categorize and calculate respawn times
     for boss_name, info in bosses.items():
         death_time = info.get("death_time")
-        respawn_duration = info.get("respawn_time", timedelta())
-        if death_time:
-            respawn_at = death_time + respawn_duration
-            remaining = respawn_at - now
-            if remaining.total_seconds() > 0:
-                status = "Dead"
-                respawn_in = f"{int(remaining.total_seconds()//3600)}h {(int(remaining.total_seconds()%3600)//60)}m {int(remaining.total_seconds()%60)}s"
-            else:
-                status = "Alive"
-                respawn_in = "0h 0m 0s"
-        else:
-            status = "Alive"
-            respawn_in = "N/A"
-            respawn_at = now
+        respawn_time = info.get("respawn_time", timedelta())
+        killed_by = f"<@{info.get('killed_by')}>" if info.get('killed_by') else "N/A"
+        is_scheduled = info.get("is_scheduled", False)
+        schedule = info.get("schedule", [])
 
-        marked_by = await get_marked_by_display(info.get("killed_by"), ctx.guild)
-        lines.append(
-            f"{boss_name:<15}{status:<10}{respawn_in:<15}"
-            f"{respawn_at.strftime('%m-%d-%Y %I:%M %p'):<22}{marked_by:<15}"
+        # Handle scheduled bosses differently
+        if is_scheduled:
+            spawn_time = info.get("spawn_time")
+            if spawn_time:
+                status = "✅ Alive" if now >= spawn_time else "⏰ Scheduled"
+
+                # Format the schedule for display
+                schedule_text = ""
+                for day, time_str in schedule:
+                    schedule_text += f"{day} {time_str}, "
+                schedule_text = schedule_text.rstrip(", ")  # Remove trailing comma
+
+                boss_data = {
+                    "name": boss_name,
+                    "status": status,
+                    "schedule_text": schedule_text,
+                    "respawn_str": spawn_time.strftime("%m-%d-%Y %I:%M %p"),
+                    "respawn_at": spawn_time,
+                    "death_time": death_time
+                }
+
+                if now >= spawn_time:
+                    alive_bosses.append(boss_data)
+                elif spawn_time.date() == now.date():
+                    today_bosses.append(boss_data)
+                elif (spawn_time.date() - now.date()).days <= 7:  # Spawning within a week
+                    other_bosses.append(boss_data)
+                else:
+                    scheduled_bosses.append(boss_data)
+            continue
+
+        # Regular boss logic (unchanged)
+        if death_time:
+            respawn_at = death_time + respawn_time
+            status = "✅ Alive" if now >= respawn_at else "❌ Dead"
+            respawn_str = respawn_at.strftime("%m-%d-%Y %I:%M %p")
+
+            boss_data = {
+                "name": boss_name,
+                "status": status,
+                "respawn_str": respawn_str,
+                "killed_by": killed_by,
+                "respawn_at": respawn_at,
+                "death_time": death_time
+            }
+
+            if now >= respawn_at:
+                alive_bosses.append(boss_data)
+            elif respawn_at.date() == now.date():
+                today_bosses.append(boss_data)
+            else:
+                other_bosses.append(boss_data)
+        else:
+            # Boss is alive (never died)
+            boss_data = {
+                "name": boss_name,
+                "status": "✅ Alive",
+                "respawn_str": "N/A",
+                "killed_by": killed_by,
+                "respawn_at": now + timedelta(days=365),  # Far future for sorting
+                "death_time": None
+            }
+            alive_bosses.append(boss_data)
+
+    # Sort bosses by respawn time (soonest first)
+    today_bosses.sort(key=lambda x: x["respawn_at"])
+    other_bosses.sort(key=lambda x: x["respawn_at"])
+    alive_bosses.sort(key=lambda x: x["name"])  # Sort alive bosses alphabetically
+    scheduled_bosses.sort(key=lambda x: x["respawn_at"])  # Sort scheduled bosses by spawn time
+
+    # Function to split a list into chunks of max 25 items
+    def chunk_list(lst, chunk_size):
+        for i in range(0, len(lst), chunk_size):
+            yield lst[i:i + chunk_size]
+
+    # Create embeds
+    embeds = []
+
+    # Today's bosses (split into multiple pages if needed)
+    today_chunks = list(chunk_list(today_bosses, 25))
+    for i, chunk in enumerate(today_chunks):
+        embed = discord.Embed(
+            title=f"📅 LordNine Boss Timers - Today's Spawns (Page {i + 1})",
+            description=f"🔥🐉 **__⚔️ BOSS SPAWNS FOR TODAY ⚔️__** 🐉🔥\n\n"
+                        f"_Timezone: Asia/Singapore_\n"
+                        f"Last updated: {now.strftime('%m-%d-%Y %I:%M %p')}",
+            color=discord.Color.green()
         )
 
-    final_message = "```" + header + "\n".join(lines) + "```"
-    await ctx.send(final_message)
+        for boss in chunk:
+            if "schedule_text" in boss:  # Scheduled boss
+                embed.add_field(
+                    name=f"⚔️ {boss['name']}",
+                    value=f"**Status:** {boss['status']}\n**Schedule:** {boss['schedule_text']}\n**Next Spawn:** {boss['respawn_str']}",
+                    inline=False
+                )
+            else:  # Regular boss
+                embed.add_field(
+                    name=f"⚔️ {boss['name']}",
+                    value=f"**Status:** {boss['status']}\n**Respawn At:** {boss['respawn_str']}\n**Marked By:** {boss['killed_by']}",
+                    inline=False
+                )
 
+        embeds.append(embed)
+
+    # Other bosses within the next week (split into multiple pages if needed)
+    other_chunks = list(chunk_list(other_bosses, 25))
+    for i, chunk in enumerate(other_chunks):
+        embed = discord.Embed(
+            title=f"📅 LordNine Boss Timers - Next Week Spawns (Page {len(embeds) + 1})",
+            description=f"**__📌 BOSS spawns within the next week__**\n\n"
+                        f"_Timezone: Asia/Singapore_\n"
+                        f"Last updated: {now.strftime('%m-%d-%Y %I:%M %p')}",
+            color=discord.Color.blue()
+        )
+
+        for boss in chunk:
+            if "schedule_text" in boss:  # Scheduled boss
+                embed.add_field(
+                    name=f"⚔️ {boss['name']}",
+                    value=f"**Status:** {boss['status']}\n**Schedule:** {boss['schedule_text']}\n**Next Spawn:** {boss['respawn_str']}",
+                    inline=False
+                )
+            else:  # Regular boss
+                embed.add_field(
+                    name=f"⚔️ {boss['name']}",
+                    value=f"**Status:** {boss['status']}\n**Respawn At:** {boss['respawn_str']}\n**Marked By:** {boss['killed_by']}",
+                    inline=False
+                )
+
+        embeds.append(embed)
+
+    # Alive bosses (split into multiple pages if needed)
+    alive_chunks = list(chunk_list(alive_bosses, 25))
+    for i, chunk in enumerate(alive_chunks):
+        embed = discord.Embed(
+            title=f"📅 LordNine Boss Timers - Alive Bosses (Page {len(embeds) + 1})",
+            description=f"**__✅ Currently Alive BOSSES __**\n\n"
+                        f"_Timezone: Asia/Singapore_\n"
+                        f"Last updated: {now.strftime('%m-%d-%Y %I:%M %p')}",
+            color=discord.Color.gold()
+        )
+
+        for boss in chunk:
+            if "schedule_text" in boss:  # Scheduled boss
+                embed.add_field(
+                    name=f"⚔️ {boss['name']}",
+                    value=f"**Status:** {boss['status']}\n**Schedule:** {boss['schedule_text']}\n**Next Spawn:** {boss['respawn_str']}",
+                    inline=False
+                )
+            else:  # Regular boss
+                embed.add_field(
+                    name=f"⚔️ {boss['name']}",
+                    value=f"**Status:** {boss['status']}\n**Respawn At:** {boss['respawn_str']}\n**Marked By:** {boss['killed_by']}",
+                    inline=False
+                )
+
+        embeds.append(embed)
+
+    # Future scheduled bosses (split into multiple pages if needed)
+    scheduled_chunks = list(chunk_list(scheduled_bosses, 25))
+    for i, chunk in enumerate(scheduled_chunks):
+        embed = discord.Embed(
+            title=f"📅 LordNine Boss Timers - Future Scheduled (Page {len(embeds) + 1})",
+            description=f"**__⏰ Future Scheduled BOSSES __**\n\n"
+                        f"_Timezone: Asia/Singapore_\n"
+                        f"Last updated: {now.strftime('%m-%d-%Y %I:%M %p')}",
+            color=discord.Color.purple()
+        )
+
+        for boss in chunk:
+            embed.add_field(
+                name=f"⚔️ {boss['name']}",
+                value=f"**Status:** {boss['status']}\n**Schedule:** {boss['schedule_text']}\n**Next Spawn:** {boss['respawn_str']}",
+                inline=False
+            )
+
+        embeds.append(embed)
+
+    # If all embeds are empty, return at least one
+    if not embeds:
+        embed = discord.Embed(
+            title="📅 LordNine Boss Timers",
+            description="No bosses are currently being tracked.",
+            color=discord.Color.green()
+        )
+        embeds.append(embed)
+
+    return embeds
+
+# --- COMMANDS ---
 @bot.command(name="boss_add")
 async def boss_add(ctx, name: str, respawn_hours: float):
     spawn_time = datetime.now(sg_timezone)
@@ -232,11 +396,11 @@ async def boss_add(ctx, name: str, respawn_hours: float):
         "spawn_time": spawn_time,
         "death_time": None,
         "respawn_time": timedelta(hours=respawn_hours),
-        "killed_by": None
+        "killed_by": None,
     }
     await save_bosses()
-    view = BossDeathButton(name)
-    await ctx.send(f"Boss '{name}' added! Respawn time: {respawn_hours} hours.", view=view)
+    await ctx.send(f"✅ Boss '{name}' added with respawn {respawn_hours}h.")
+
 
 @bot.command(name="boss_delete")
 async def boss_delete(ctx, name: str):
@@ -245,19 +409,18 @@ async def boss_delete(ctx, name: str):
         return
     del bosses[name]
     await save_bosses()
-    await ctx.send(f"✅ Boss '{name}' has been deleted successfully!")
+    await ctx.send(f"✅ Boss '{name}' deleted.")
 
-@bot.command(name="boss_clear_adm")
-async def boss_clear_adm(ctx):
-    bosses.clear()
-    reminder_sent.clear()
-    if os.path.exists(DATA_FILE):
-        os.remove(DATA_FILE)
-    await ctx.send("All bosses have been cleared and JSON file reset!")
+
+@bot.command(name="boss_status")
+async def boss_status(ctx):
+    await refresh_status_message()
+    await ctx.send("✅ Boss status refreshed!")
+
 
 @bot.command(name="boss_tod_edit")
 async def boss_tod_edit(ctx, name: str = None, *, new_time: str = None):
-    if name not in bosses:
+    if not name or name not in bosses:
         await ctx.send(f"❌ Boss '{name}' not found.")
         return
 
@@ -274,176 +437,365 @@ async def boss_tod_edit(ctx, name: str = None, *, new_time: str = None):
     bosses[name]["death_time"] = death_time
     bosses[name]["killed_by"] = ctx.author.id
     await save_bosses()
+
     await ctx.send(
         f"✅ Time of Death for **{name}** updated to {death_time.strftime('%m-%d-%Y %I:%M %p')} by {ctx.author.mention}"
     )
 
-# --- EXPORT BOSS DATA ---
-@bot.command(name="boss_export_json")
-async def export_bosses(ctx):
-    import io
-    data = {
-        name: {
-            "spawn_time": info["spawn_time"].isoformat() if info.get("spawn_time") else None,
-            "death_time": info["death_time"].isoformat() if info.get("death_time") else None,
-            "respawn_hours": info["respawn_time"].total_seconds() / 3600,
-            "killed_by": info.get("killed_by")
+# Add this command with the others
+@bot.command(name="boss_add_schedule")
+async def boss_add_scheduled(ctx, *, args: str):
+    """
+    Add a boss with scheduled spawn times
+    Format: /test_add_schedule <name> <day> <time> [<day> <time> ...] OR /test_add_schedule <name> <time> [<time> ...]
+    Examples:
+    - Weekly: /test_add_schedule Dragon Monday 2:30PM Wednesday 7:45PM
+    - Daily: /test_add_schedule Dragon 11:00AM 8:00PM
+    """
+    try:
+        # Parse the arguments
+        parts = args.split()
+        if len(parts) < 2:
+            await ctx.send(
+                "❌ Invalid format! Use: `/boss_add_schedule <name> <day> <time> [<day> <time> ...]` for weekly schedule OR `/boss_add_schedule <name> <time> [<time> ...]` for daily schedule")
+            return
+
+        name = parts[0]
+        schedule = []
+        is_daily = False
+
+        # Check if the second part is a day of the week or a time
+        days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        time_regex = r'^([0-9]|1[0-2]):[0-5][0-9](AM|PM)$'
+
+        if parts[1].capitalize() in days:
+            # Weekly schedule with days
+            if len(parts) < 3 or len(parts) % 2 != 1:
+                await ctx.send(
+                    "❌ Invalid format! For weekly schedule, use: `/boss_add_schedule <name> <day> <time> [<day> <time> ...]`")
+                return
+
+            for i in range(1, len(parts), 2):
+                day_str = parts[i].capitalize()
+                time_str = parts[i + 1].upper()
+
+                # Validate day
+                if day_str not in days:
+                    await ctx.send(f"❌ Invalid day: {day_str}. Use full day names (Monday, Tuesday, etc.)")
+                    return
+
+                # Validate time format (12-hour format with AM/PM)
+                if not re.match(time_regex, time_str):
+                    await ctx.send(
+                        f"❌ Invalid time format: {time_str}. Use H:MMAM/PM or HH:MMAM/PM (e.g., 2:30PM or 11:45AM)")
+                    return
+
+                schedule.append((day_str, time_str))
+        else:
+            # Daily schedule with times only
+            is_daily = True
+            # Parse time-only pairs for daily schedule
+            for i in range(1, len(parts)):
+                time_str = parts[i].upper()
+
+                # Validate time format (12-hour format with AM/PM)
+                if not re.match(time_regex, time_str):
+                    await ctx.send(
+                        f"❌ Invalid time format: {time_str}. Use H:MMAM/PM or HH:MMAM/PM (e.g., 2:30PM or 11:45AM)")
+                    return
+
+                schedule.append(("Daily", time_str))
+
+        # Calculate next spawn time from the schedule
+        now = datetime.now(sg_timezone)
+        next_spawn = None
+
+        for day, time_str in schedule:
+            if is_daily:
+                # For daily schedule, calculate next occurrence today or tomorrow
+                target_date = now.date()
+
+                # Parse 12-hour format time
+                time_str_clean = time_str.replace("AM", "").replace("PM", "")
+                time_parts = time_str_clean.split(":")
+                hour = int(time_parts[0])
+                minute = int(time_parts[1])
+
+                # Adjust for PM
+                if "PM" in time_str and hour != 12:
+                    hour += 12
+                # Adjust for AM (12AM becomes 0)
+                if "AM" in time_str and hour == 12:
+                    hour = 0
+
+                target_time = time(hour, minute)
+                candidate = sg_timezone.localize(
+                    datetime.combine(target_date, target_time)
+                )
+
+                # If time already passed today, try tomorrow
+                if candidate < now:
+                    candidate += timedelta(days=1)
+            else:
+                # For weekly schedule, find the next occurrence of this day
+                day_idx = days.index(day)
+                current_day_idx = now.weekday()
+
+                days_ahead = day_idx - current_day_idx
+                if days_ahead <= 0:  # Target day already happened this week
+                    days_ahead += 7
+
+                target_date = now + timedelta(days=days_ahead)
+
+                # Parse 12-hour format time
+                time_str_clean = time_str.replace("AM", "").replace("PM", "")
+                time_parts = time_str_clean.split(":")
+                hour = int(time_parts[0])
+                minute = int(time_parts[1])
+
+                # Adjust for PM
+                if "PM" in time_str and hour != 12:
+                    hour += 12
+                # Adjust for AM (12AM becomes 0)
+                if "AM" in time_str and hour == 12:
+                    hour = 0
+
+                target_time = time(hour, minute)
+                candidate = sg_timezone.localize(
+                    datetime.combine(target_date.date(), target_time)
+                )
+
+            if next_spawn is None or candidate < next_spawn:
+                next_spawn = candidate
+
+        # Store the boss with its schedule
+        bosses[name] = {
+            "spawn_time": next_spawn,
+            "death_time": None,
+            "respawn_time": timedelta(days=1) if is_daily else timedelta(weeks=1),
+            "killed_by": None,
+            "schedule": schedule,  # Store the schedule for future calculations
+            "is_scheduled": True,  # Flag to identify scheduled bosses
+            "is_daily": is_daily  # Flag to identify daily vs weekly bosses
         }
-        for name, info in bosses.items()
-    }
-    file = io.StringIO()
-    json.dump(data, file, indent=4)
-    file.seek(0)
-    await ctx.send(file=discord.File(fp=file, filename="bosses_export.json"))
 
-# --- BACKGROUND TASK: CHECK BOSS RESPAWNS ---
-@tasks.loop(seconds=30)
-async def check_boss_respawns():
+        await save_bosses()
+
+        if is_daily:
+            times = [time for day, time in schedule]
+            schedule_text = ", ".join(times)
+            await ctx.send(
+                f"✅ Boss '{name}' added with daily schedule: {schedule_text}. Next spawn: {next_spawn.strftime('%m-%d-%Y %I:%M %p')}")
+        else:
+            schedule_text = ", ".join([f"{day} {time}" for day, time in schedule])
+            await ctx.send(
+                f"✅ Boss '{name}' added with weekly schedule: {schedule_text}. Next spawn: {next_spawn.strftime('%m-%d-%Y %I:%M %p')}")
+
+    except Exception as e:
+        await ctx.send(f"❌ Error adding scheduled boss: {str(e)}")
+        print(f"Error in boss_add_schedule: {e}")
+
+        @bot.command(name="boss_export_json")
+        async def export_bosses(ctx):
+            import io
+            data = {
+                name: {
+                    "spawn_time": info["spawn_time"].isoformat() if info.get("spawn_time") else None,
+                    "death_time": info["death_time"].isoformat() if info.get("death_time") else None,
+                    "respawn_hours": info["respawn_time"].total_seconds() / 3600,
+                    "killed_by": info.get("killed_by"),
+                    "schedule": info.get("schedule"),
+                    "is_scheduled": info.get("is_scheduled", False),
+                    "is_daily": info.get("is_daily", False)
+                }
+                for name, info in bosses.items()
+            }
+            file = io.StringIO()
+            json.dump(data, file, indent=4)
+            file.seek(0)
+            await ctx.send(file=discord.File(fp=file, filename="bosses_export.json"))
+
+# --- BOSS RESPAWN NOTIFICATIONS (NO AUTO REFRESH) ---
+# We need to modify the boss_respawn_notifications function to properly handle respawn alerts
+# We need to modify the boss_respawn_notifications function to handle daily schedules correctly
+@tasks.loop(seconds=5)  # 5 seconds for better precision
+async def boss_respawn_notifications():
+    chat_channel = bot.get_channel(CHANNEL_ID)
+    if not chat_channel:
+        return
+
     now = datetime.now(sg_timezone)
-    for name, info in bosses.items():
-        if info["death_time"]:
-            respawn_time = info["death_time"] + info["respawn_time"]
-            channel = discord.utils.get(bot.get_all_channels(), id=CHANNEL_ID)
-            if not channel:
-                continue
 
-            # 5-minute reminder with @everyone
-            if 0 < (respawn_time - now).total_seconds() <= 300:
-                if name not in reminder_sent:
-                    await channel.send(f"@everyone Reminder: Boss '{name}' will respawn in 5 minutes!")
-                    reminder_sent.add(name)
+    for boss_name, info in list(bosses.items()):
+        is_scheduled = info.get("is_scheduled", False)
 
-            # Boss respawned with @everyone + Time of Death button
-            if now >= respawn_time:
-                view = BossDeathButton(name)
-                await channel.send(f"@everyone Boss '{name}' has respawned!", view=view)
+        # For scheduled bosses, calculate next spawn based on schedule
+        if is_scheduled:
+            schedule = info.get("schedule", [])
+            is_daily = info.get("is_daily", False)
 
-                # Reset death and killer info
-                info["death_time"] = None
-                info["killed_by"] = None
+            # Get the current spawn time
+            current_spawn_time = info.get("spawn_time")
+
+            # Always calculate the next spawn time to ensure it's correct
+            next_spawn = None
+
+            for day, time_str in schedule:
+                if is_daily:
+                    # For daily schedule, calculate next occurrence
+                    target_date = now.date()
+
+                    # Parse 12-hour format time
+                    time_str_clean = time_str.replace("AM", "").replace("PM", "")
+                    time_parts = time_str_clean.split(":")
+                    hour = int(time_parts[0])
+                    minute = int(time_parts[1])
+
+                    # Adjust for PM
+                    if "PM" in time_str and hour != 12:
+                        hour += 12
+                    # Adjust for AM (12AM becomes 0)
+                    if "AM" in time_str and hour == 12:
+                        hour = 0
+
+                    target_time = time(hour, minute)
+                    candidate = sg_timezone.localize(
+                        datetime.combine(target_date, target_time)
+                    )
+
+                    # If time already passed today, try tomorrow
+                    if candidate <= now:
+                        candidate += timedelta(days=1)
+                else:
+                    # For weekly schedule, find the next occurrence of this day
+                    days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+                    day_idx = days.index(day)
+                    current_day_idx = now.weekday()
+
+                    days_ahead = day_idx - current_day_idx
+                    if days_ahead < 0 or (days_ahead == 0 and now.time() > time(hour, minute)):
+                        # Target day already happened this week or time already passed today
+                        days_ahead += 7
+
+                    target_date = now + timedelta(days=days_ahead)
+
+                    # Parse 12-hour format time
+                    time_str_clean = time_str.replace("AM", "").replace("PM", "")
+                    time_parts = time_str_clean.split(":")
+                    hour = int(time_parts[0])
+                    minute = int(time_parts[1])
+
+                    # Adjust for PM
+                    if "PM" in time_str and hour != 12:
+                        hour += 12
+                    # Adjust for AM (12AM becomes 0)
+                    if "AM" in time_str and hour == 12:
+                        hour = 0
+
+                    target_time = time(hour, minute)
+                    candidate = sg_timezone.localize(
+                        datetime.combine(target_date.date(), target_time)
+                    )
+
+                if next_spawn is None or candidate < next_spawn:
+                    next_spawn = candidate
+
+            # Update the spawn time if it's different
+            if current_spawn_time != next_spawn:
+                info["spawn_time"] = next_spawn
+                current_spawn_time = next_spawn
                 await save_bosses()
 
-                if name in reminder_sent:
-                    reminder_sent.remove(name)
+            # Calculate time until respawn
+            seconds_until_respawn = (current_spawn_time - now).total_seconds()
+
+            # 5-minute warning (300 seconds)
+            if 0 < seconds_until_respawn <= 300 and (boss_name, "5m") not in reminder_sent:
+                # Send warning exactly at 5 minutes before
+                if seconds_until_respawn <= 300 and seconds_until_respawn > 295:
+                    await chat_channel.send(f"⏰**REMINDER:** @everyone **{boss_name}** will respawn in **5 minutes**!")
+                    reminder_sent.add((boss_name, "5m"))
+
+            # Respawn alert - check if current time is equal to or past the spawn time
+            if now >= current_spawn_time and (boss_name, "respawn") not in reminder_sent:
+                await chat_channel.send(f"✅**ATTENTION!** @everyone __**{boss_name}**__ has respawned! Time to hunt!")
+                reminder_sent.add((boss_name, "respawn"))
+                reminder_sent.discard((boss_name, "5m"))
+
+                # After respawn, calculate next spawn time
+                if is_daily:
+                    next_spawn_time = current_spawn_time + timedelta(days=1)
+                else:
+                    next_spawn_time = current_spawn_time + timedelta(weeks=1)
+                info["spawn_time"] = next_spawn_time
+                await save_bosses()
+
+        # For regular bosses
+        else:
+            death_time = info.get("death_time")
+            respawn_time = info.get("respawn_time", timedelta())
+
+            if not death_time or not respawn_time:
+                continue
+                
+            respawn_at = death_time + respawn_time
+            seconds_until_respawn = (respawn_at - now).total_seconds()
+
+            # 5-minute warning (300 seconds)
+            if 0 < seconds_until_respawn <= 300 and (boss_name, "5m") not in reminder_sent:
+                # Send warning exactly at 5 minutes before
+                if seconds_until_respawn <= 300 and seconds_until_respawn > 295:
+                    await chat_channel.send(f"⏰**REMINDER:** @everyone **{boss_name}** will respawn in **5 minutes**!")
+                    reminder_sent.add((boss_name, "5m"))
+
+            # Respawn alert
+            if seconds_until_respawn <= 0 and (boss_name, "respawn") not in reminder_sent:
+                view = View(timeout=None)
+                tod_button = Button(label=f"Time of Death {boss_name}", style=discord.ButtonStyle.danger)
+
+                async def button_callback(interaction, b_name=boss_name, ch=chat_channel):
+                    now_click = datetime.now(sg_timezone)
+                    bosses[b_name]["death_time"] = now_click
+                    bosses[b_name]["killed_by"] = interaction.user.id
+                    await save_bosses()
+
+                    respawn_at_new = now_click + bosses[b_name]["respawn_time"]
+
+                    await ch.send(
+                        f"⚔️ Boss '{b_name}' marked dead by {interaction.user.mention} at {now_click.strftime('%m-%d-%Y %I:%M %p')}.\n"
+                        f"Respawns at: {respawn_at_new.strftime('%m-%d-%Y %I:%M %p')}"
+                    )
+                    try:
+                        await interaction.response.send_message("✅ Time of Death recorded.", ephemeral=True)
+                    except:
+                        pass
+
+                    reminder_sent.discard((b_name, "5m"))
+                    reminder_sent.discard((b_name, "respawn"))
+
+                    try:
+                        await interaction.message.edit(view=None)
+                    except:
+                        pass
+
+                    # Refresh status embeds after TOD button is pressed
+                    await refresh_status_message()
+
+                tod_button.callback = button_callback
+                view.add_item(tod_button)
+
+                await chat_channel.send(f"✅**ATTENTION!** @everyone __**{boss_name}**__ has respawned! Time to hunt!",
+                                        view=view)
+                reminder_sent.add((boss_name, "respawn"))
+                reminder_sent.discard((boss_name, "5m"))
 
 # --- ON READY ---
 @bot.event
 async def on_ready():
     print(f"Bot logged in as {bot.user}")
     load_bosses()
-    check_boss_respawns.start()
+    # Only start the notification task, not auto-refresh
+    boss_respawn_notifications.start()
 
-# -------------------------------------------------------------------------------------------------------- #
-# --- ATTENDANCE FEATURE ---
-attendance_data = {
-    "active": False,
-    "created_by": None,
-    "attendees": [],
-    "message_id": None,
-    "channel_id": None
-}
-
-class AttendanceView(View):
-    def __init__(self, author_id):
-        super().__init__(timeout=None)
-        self.author_id = author_id
-
-    @discord.ui.button(label="Join", style=discord.ButtonStyle.green)
-    async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not attendance_data["active"]:
-            await interaction.response.send_message("❌ Attendance is closed.", ephemeral=True)
-            return
-
-        user_id = interaction.user.id
-        if user_id not in attendance_data["attendees"]:
-            attendance_data["attendees"].append(user_id)
-            await save_attendance()
-            await update_attendance_message(interaction.guild)
-            await interaction.response.send_message("✅ You joined the attendance!", ephemeral=True)
-        else:
-            await interaction.response.send_message("You are already in the attendance list!", ephemeral=True)
-
-    @discord.ui.button(label="Close Attendance", style=discord.ButtonStyle.red)
-    async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("❌ Only the creator can close the attendance.", ephemeral=True)
-            return
-
-        attendance_data["active"] = False
-        await save_attendance()
-        await update_attendance_message(interaction.guild, closed=True)
-        await interaction.response.send_message("✅ Attendance has been closed!", ephemeral=True)
-
-
-async def save_attendance():
-    async with json_lock:
-        data = {}
-        if os.path.exists(DATA_FILE):
-            with open(DATA_FILE, "r") as f:
-                data = json.load(f)
-        data["attendance"] = attendance_data
-        with open(DATA_FILE, "w") as f:
-            json.dump(data, f, indent=4)
-
-def load_attendance():
-    if not os.path.exists(DATA_FILE):
-        return
-    with open(DATA_FILE, "r") as f:
-        data = json.load(f)
-    if "attendance" in data:
-        global attendance_data
-        attendance_data.update(data["attendance"])
-
-async def update_attendance_message(guild, closed=False):
-    """Updates the attendance embed message."""
-    channel = guild.get_channel(attendance_data["channel_id"])
-    if not channel:
-        return
-
-    try:
-        msg = await channel.fetch_message(attendance_data["message_id"])
-    except:
-        return
-
-    members_list = []
-    for uid in attendance_data["attendees"]:
-        name = await get_marked_by_display(uid, guild)
-        members_list.append(f"- {name}")
-
-    attendees_text = "\n".join(members_list) if members_list else "No attendees yet."
-
-    embed = discord.Embed(
-        title="📋 Guild Attendance",
-        description=f"Created by: <@{attendance_data['created_by']}>\n\n**Attendees:**\n{attendees_text}",
-        color=discord.Color.green() if attendance_data["active"] else discord.Color.red()
-    )
-
-    await msg.edit(embed=embed, view=None if closed else AttendanceView(attendance_data["created_by"]))
-
-@bot.command(name="guild_attendance")
-async def guild_attendance(ctx):
-    if attendance_data["active"]:
-        await ctx.send("❌ There is already an active attendance! Close it first before starting a new one.")
-        return
-
-    attendance_data.update({
-        "active": True,
-        "created_by": ctx.author.id,
-        "attendees": [],
-        "message_id": None,
-        "channel_id": ctx.channel.id
-    })
-    await save_attendance()
-
-    embed = discord.Embed(
-        title="📋 Guild Attendance",
-        description=f"Created by: {ctx.author.mention}\n\n**Attendees:**\nNo attendees yet.",
-        color=discord.Color.green()
-    )
-    msg = await ctx.send(embed=embed, view=AttendanceView(ctx.author.id))
-
-    attendance_data["message_id"] = msg.id
-    await save_attendance()
-
-# --- RUN BOT ---
+# --- RUN ---
 bot.run(TOKEN)
