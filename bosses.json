@@ -3,132 +3,362 @@
         "spawn_time": "2025-09-09T21:36:45.320796+08:00",
         "death_time": "2025-09-13T23:27:54.378277+08:00",
         "respawn_hours": 10.0,
-        "killed_by": 879460969967931402
+        "killed_by": 879460969967931402,
+        "schedule": [],
+        "is_scheduled": false,
+        "is_daily": false
     },
     "Viorent": {
         "spawn_time": "2025-09-09T21:36:49.204125+08:00",
         "death_time": "2025-09-13T23:28:41.642783+08:00",
         "respawn_hours": 10.0,
-        "killed_by": 879460969967931402
+        "killed_by": 879460969967931402,
+        "schedule": [],
+        "is_scheduled": false,
+        "is_daily": false
     },
     "Ego": {
         "spawn_time": "2025-09-09T21:36:52.205723+08:00",
         "death_time": "2025-09-13T04:21:30.162263+08:00",
         "respawn_hours": 21.0,
-        "killed_by": 879460969967931402
+        "killed_by": 879460969967931402,
+        "schedule": [],
+        "is_scheduled": false,
+        "is_daily": false
     },
     "Livera": {
         "spawn_time": "2025-09-09T21:36:55.642884+08:00",
         "death_time": "2025-09-13T13:35:01.298787+08:00",
         "respawn_hours": 24.0,
-        "killed_by": 315369712693280768
+        "killed_by": 315369712693280768,
+        "schedule": [],
+        "is_scheduled": false,
+        "is_daily": false
     },
     "Araneo": {
         "spawn_time": "2025-09-09T21:36:58.640307+08:00",
         "death_time": "2025-09-13T13:42:45.412639+08:00",
         "respawn_hours": 24.0,
-        "killed_by": 315369712693280768
+        "killed_by": 315369712693280768,
+        "schedule": [],
+        "is_scheduled": false,
+        "is_daily": false
     },
     "Undomiel": {
         "spawn_time": "2025-09-09T21:37:02.129422+08:00",
         "death_time": "2025-09-13T13:40:43.825636+08:00",
         "respawn_hours": 24.0,
-        "killed_by": 315369712693280768
+        "killed_by": 315369712693280768,
+        "schedule": [],
+        "is_scheduled": false,
+        "is_daily": false
     },
     "LadyDalia": {
         "spawn_time": "2025-09-09T21:37:04.887133+08:00",
         "death_time": "2025-09-13T07:55:00+08:00",
         "respawn_hours": 18.0,
-        "killed_by": 315369712693280768
+        "killed_by": 315369712693280768,
+        "schedule": [],
+        "is_scheduled": false,
+        "is_daily": false
     },
     "GeneralAquleus": {
         "spawn_time": "2025-09-09T21:37:08.089693+08:00",
         "death_time": "2025-09-13T06:34:24.259618+08:00",
         "respawn_hours": 29.0,
-        "killed_by": 879460969967931402
+        "killed_by": 879460969967931402,
+        "schedule": [],
+        "is_scheduled": false,
+        "is_daily": false
     },
     "Amentis": {
         "spawn_time": "2025-09-09T21:37:15.307767+08:00",
         "death_time": "2025-09-13T05:42:38.988703+08:00",
         "respawn_hours": 29.0,
-        "killed_by": 879460969967931402
+        "killed_by": 879460969967931402,
+        "schedule": [],
+        "is_scheduled": false,
+        "is_daily": false
     },
     "BaronBraudmore": {
         "spawn_time": "2025-09-09T21:37:17.769072+08:00",
         "death_time": "2025-09-12T21:38:31.371890+08:00",
         "respawn_hours": 32.0,
-        "killed_by": 879460969967931402
+        "killed_by": 879460969967931402,
+        "schedule": [],
+        "is_scheduled": false,
+        "is_daily": false
     },
     "Wannitas": {
         "spawn_time": "2025-09-09T21:37:21.114517+08:00",
         "death_time": "2025-09-13T14:01:31.396726+08:00",
         "respawn_hours": 48.0,
-        "killed_by": 315369712693280768
+        "killed_by": 315369712693280768,
+        "schedule": [],
+        "is_scheduled": false,
+        "is_daily": false
     },
     "Metus": {
         "spawn_time": "2025-09-09T21:37:23.730796+08:00",
         "death_time": "2025-09-13T13:47:36.013003+08:00",
         "respawn_hours": 48.0,
-        "killed_by": 315369712693280768
+        "killed_by": 315369712693280768,
+        "schedule": [],
+        "is_scheduled": false,
+        "is_daily": false
     },
     "Duplican": {
         "spawn_time": "2025-09-09T21:37:26.216845+08:00",
         "death_time": "2025-09-13T13:56:58.901717+08:00",
         "respawn_hours": 48.0,
-        "killed_by": 315369712693280768
+        "killed_by": 315369712693280768,
+        "schedule": [],
+        "is_scheduled": false,
+        "is_daily": false
     },
     "Shuliar": {
         "spawn_time": "2025-09-09T21:37:28.382444+08:00",
         "death_time": "2025-09-13T18:59:08.146234+08:00",
         "respawn_hours": 35.0,
-        "killed_by": 879460969967931402
+        "killed_by": 879460969967931402,
+        "schedule": [],
+        "is_scheduled": false,
+        "is_daily": false
     },
     "Gareth": {
         "spawn_time": "2025-09-09T21:37:31.325090+08:00",
         "death_time": "2025-09-13T02:49:34.480642+08:00",
         "respawn_hours": 32.0,
-        "killed_by": 775776571122253855
+        "killed_by": 775776571122253855,
+        "schedule": [],
+        "is_scheduled": false,
+        "is_daily": false
     },
     "Titore": {
         "spawn_time": "2025-09-09T21:37:35.001146+08:00",
-        "death_time": null,
+        "death_time": "2025-09-13T22:54:47.045826+08:00",
         "respawn_hours": 37.0,
-        "killed_by": null
+        "killed_by": null,
+        "schedule": [],
+        "is_scheduled": false,
+        "is_daily": false
     },
     "Larba": {
         "spawn_time": "2025-09-09T21:37:41.464393+08:00",
         "death_time": "2025-09-13T19:28:19.044398+08:00",
         "respawn_hours": 35.0,
-        "killed_by": 879460969967931402
+        "killed_by": 879460969967931402,
+        "schedule": [],
+        "is_scheduled": false,
+        "is_daily": false
     },
     "Catena": {
         "spawn_time": "2025-09-09T21:37:46.418408+08:00",
-        "death_time": null,
+        "death_time": "2025-09-13T22:54:47.045826+08:00",
         "respawn_hours": 35.0,
-        "killed_by": null
+        "killed_by": null,
+        "schedule": [],
+        "is_scheduled": false,
+        "is_daily": false
     },
     "Secreta": {
         "spawn_time": "2025-09-09T21:37:49.137512+08:00",
         "death_time": "2025-09-11T11:27:23.098142+08:00",
         "respawn_hours": 62.0,
-        "killed_by": 482228913691688980
+        "killed_by": 482228913691688980,
+        "schedule": [],
+        "is_scheduled": false,
+        "is_daily": false
     },
     "Ordo": {
         "spawn_time": "2025-09-09T21:37:51.915830+08:00",
         "death_time": "2025-09-13T23:27:22.669738+08:00",
         "respawn_hours": 62.0,
-        "killed_by": 879460969967931402
+        "killed_by": 879460969967931402,
+        "schedule": [],
+        "is_scheduled": false,
+        "is_daily": false
     },
     "Asta": {
         "spawn_time": "2025-09-09T21:37:54.386551+08:00",
         "death_time": "2025-09-13T22:54:47.045826+08:00",
         "respawn_hours": 62.0,
-        "killed_by": 879460969967931402
+        "killed_by": 879460969967931402,
+        "schedule": [],
+        "is_scheduled": false,
+        "is_daily": false
     },
     "Supore": {
         "spawn_time": "2025-09-09T21:37:57.087170+08:00",
-        "death_time": null,
+        "death_time": "2025-09-13T22:54:47.045826+08:00",
         "respawn_hours": 62.0,
-        "killed_by": null
+        "killed_by": null,
+        "schedule": [],
+        "is_scheduled": false,
+        "is_daily": false
+    },
+    "Clemantis": {
+        "spawn_time": "2025-10-02T19:00:00+08:00",
+        "death_time": null,
+        "respawn_hours": 168.0,
+        "killed_by": null,
+        "schedule": [
+            [
+                "Monday",
+                "11:30AM"
+            ],
+            [
+                "Thursday",
+                "7:00PM"
+            ]
+        ],
+        "is_scheduled": true,
+        "is_daily": false
+    },
+    "Saphirus": {
+        "spawn_time": "2025-10-05T17:00:00+08:00",
+        "death_time": null,
+        "respawn_hours": 168.0,
+        "killed_by": null,
+        "schedule": [
+            [
+                "Sunday",
+                "5:00PM"
+            ],
+            [
+                "Tuesday",
+                "11:30AM"
+            ]
+        ],
+        "is_scheduled": true,
+        "is_daily": false
+    },
+    "Neutro": {
+        "spawn_time": "2025-10-02T11:30:00+08:00",
+        "death_time": null,
+        "respawn_hours": 168.0,
+        "killed_by": null,
+        "schedule": [
+            [
+                "Tuesday",
+                "7:00PM"
+            ],
+            [
+                "Thursday",
+                "11:30AM"
+            ]
+        ],
+        "is_scheduled": true,
+        "is_daily": false
+    },
+    "Thymele": {
+        "spawn_time": "2025-10-01T11:30:00+08:00",
+        "death_time": null,
+        "respawn_hours": 168.0,
+        "killed_by": null,
+        "schedule": [
+            [
+                "Monday",
+                "7:00AM"
+            ],
+            [
+                "Wednesday",
+                "11:30AM"
+            ]
+        ],
+        "is_scheduled": true,
+        "is_daily": false
+    },
+    "Milavy": {
+        "spawn_time": "2025-10-04T15:00:00+08:00",
+        "death_time": null,
+        "respawn_hours": 168.0,
+        "killed_by": null,
+        "schedule": [
+            [
+                "Saturday",
+                "3:00PM"
+            ]
+        ],
+        "is_scheduled": true,
+        "is_daily": false
+    },
+    "Ringor": {
+        "spawn_time": "2025-10-04T17:00:00+08:00",
+        "death_time": null,
+        "respawn_hours": 168.0,
+        "killed_by": null,
+        "schedule": [
+            [
+                "Saturday",
+                "5:00PM"
+            ]
+        ],
+        "is_scheduled": true,
+        "is_daily": false
+    },
+    "Roderick": {
+        "spawn_time": "2025-10-03T19:00:00+08:00",
+        "death_time": null,
+        "respawn_hours": 168.0,
+        "killed_by": null,
+        "schedule": [
+            [
+                "Friday",
+                "7:00PM"
+            ]
+        ],
+        "is_scheduled": true,
+        "is_daily": false
+    },
+    "Auraq": {
+        "spawn_time": "2025-10-01T21:00:00+08:00",
+        "death_time": null,
+        "respawn_hours": 168.0,
+        "killed_by": null,
+        "schedule": [
+            [
+                "Sunday",
+                "9:00PM"
+            ],
+            [
+                "Wednesday",
+                "9:00PM"
+            ]
+        ],
+        "is_scheduled": true,
+        "is_daily": false
+    },
+    "Chaiflock": {
+        "spawn_time": "2025-10-04T22:00:00+08:00",
+        "death_time": null,
+        "respawn_hours": 168.0,
+        "killed_by": null,
+        "schedule": [
+            [
+                "Saturday",
+                "10:00PM"
+            ]
+        ],
+        "is_scheduled": true,
+        "is_daily": false
+    },
+    "RATAN/PARTO/NEDRA": {
+        "spawn_time": "2025-10-01T11:00:00+08:00",
+        "death_time": null,
+        "respawn_hours": 24.0,
+        "killed_by": null,
+        "schedule": [
+            [
+                "Daily",
+                "11:00AM"
+            ],
+            [
+                "Daily",
+                "8:00PM"
+            ]
+        ],
+        "is_scheduled": true,
+        "is_daily": true
     }
 }
