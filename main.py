@@ -2,6 +2,7 @@ import os
 from flask import Flask
 from threading import Thread
 
+
 # --- Flask server to satisfy Render port requirement ---
 app = Flask("")
 
@@ -1950,8 +1951,7 @@ async def boss_add_scheduled(ctx, *, args: str):
 async def boss_weekly_stats(ctx):
     """
     Show how many times each boss spawned this week.
-    - For unscheduled bosses: based on recorded kills (actual data)
-    - For scheduled bosses: based on weekly or daily schedule (predicted)
+    Splits results into multiple embeds if over 25 bosses.
     """
     now = datetime.now(sg_timezone)
     start_of_week = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -1960,7 +1960,7 @@ async def boss_weekly_stats(ctx):
     boss_counts = {}
     total_kills = 0
 
-    # ✅ Step 1: Count kills for unscheduled bosses
+    # Unscheduled bosses (actual kills)
     for boss_name, info in bosses.items():
         is_scheduled = info.get("is_scheduled", False)
         if not is_scheduled:
@@ -1977,40 +1977,44 @@ async def boss_weekly_stats(ctx):
             boss_counts[boss_name] = count
             total_kills += count
 
-    # ✅ Step 2: Add predicted spawn counts for scheduled bosses
+    # Scheduled bosses (predicted spawns)
     for boss_name, info in bosses.items():
         if info.get("is_scheduled", False):
             schedule = info.get("schedule", [])
             is_daily = info.get("is_daily", False)
-            if is_daily:
-                # Daily schedule: number of times per day × 7 days
-                count = len(schedule) * 7
-            else:
-                # Weekly schedule: one per entry
-                count = len(schedule)
+            count = len(schedule) * 7 if is_daily else len(schedule)
             boss_counts[boss_name] = count
             total_kills += count
 
-    # ✅ Step 3: Build the embed
-    embed = discord.Embed(
-        title="📊 Weekly Boss Spawn Summary",
-        description=f"**__Boss Spawns This Week__**\nTimezone: Asia/Singapore\n"
-                    f"Week starting {start_of_week.strftime('%B %d, %Y')}",
-        color=discord.Color.purple()
-    )
+    # Sort by spawn count descending
+    sorted_bosses = sorted(boss_counts.items(), key=lambda x: x[1], reverse=True)
 
-    # Sort by count descending
-    for name, count in sorted(boss_counts.items(), key=lambda x: x[1], reverse=True):
-        if count > 0:
-            embed.add_field(name=f"⚔️ {name}", value=f"{count} spawns this week", inline=False)
+    # Split into chunks of 25
+    chunk_size = 25
+    chunks = [sorted_bosses[i:i + chunk_size] for i in range(0, len(sorted_bosses), chunk_size)]
 
-    embed.add_field(name="📅 Total Boss Spawns", value=f"**{total_kills}**", inline=False)
+    for i, chunk in enumerate(chunks, start=1):
+        embed = discord.Embed(
+            title=f"📊 Weekly Boss Spawn Summary — Page {i}/{len(chunks)}",
+            description=(
+                f"**__Boss Spawns This Week__**\n"
+                f"Week starting {start_of_week.strftime('%B %d, %Y')}\n"
+                f"Timezone: Asia/Singapore"
+            ),
+            color=discord.Color.purple(),
+            timestamp=now
+        )
 
-    if total_kills == 0:
-        embed.description += "\n\n_No bosses have spawned yet this week._"
+        for name, count in chunk:
+            if count > 0:
+                embed.add_field(name=f"⚔️ {name}", value=f"{count} spawns this week", inline=False)
 
-    embed.set_footer(text="Includes actual kills for regular bosses and scheduled spawns for weekly/daily bosses.")
-    await ctx.send(embed=embed)
+        if i == len(chunks):
+            embed.add_field(name="📅 Total Boss Spawns", value=f"**{total_kills}**", inline=False)
+
+        embed.set_footer(text="Includes actual kills for regular bosses and scheduled spawns for weekly/daily bosses.")
+        await ctx.send(embed=embed)
+
 
 @bot.command(name="boss_today")
 async def boss_today(ctx):
