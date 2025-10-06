@@ -2,6 +2,7 @@ import os
 from flask import Flask
 from threading import Thread
 
+
 # --- Flask server to satisfy Render port requirement ---
 app = Flask("")
 
@@ -19,25 +20,994 @@ Thread(target=run_server).start()
 import os
 import json
 import asyncio
-from datetime import datetime, timedelta, time
+import csv
 import pytz
+
+from datetime import datetime, timedelta, time
 from threading import Thread
 import discord
 from discord.ext import commands, tasks
 from discord.ext.commands import cooldown, BucketType
 from discord.ui import View, Button
 import re
+
 # --- CONFIG ---
 TOKEN = "MTQxMzI0MTAwNTExNjg4MzA5OA.GpyhkL.uaSYogKFGZlqoIhC1ufRfOMMWskFxivUuNrhfw"
-CHANNEL_ID = 1413785757990260836
-DATA_FILE = "bosses.json"
-status_channel_id = 1416452770017317034
+CHANNEL_ID = 1413785757990260836  #field-boss-updates
+status_channel_id = 1416452770017317034 #boss-timer
 sg_timezone = pytz.timezone("Asia/Singapore")
 
 # --- BOT SETUP ---
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix='/', intents=intents)
+intents.members = True  # 👈 required for get_member and guild.members to work
+intents.guilds = True
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+
+# --- MERGED CONTENT FROM script.py START ---
+
+# Files to store data
+ATTENDANCE_FILE = "attendance.csv"
+POINTS_FILE = "points.csv"
+KILL_LOG_FILE = "boss_kills.json"
+DATA_FILE = "bosses.json"
+
+# Ensure attendance file exists with headers
+with open(ATTENDANCE_FILE, "a", newline="") as f:
+    writer = csv.writer(f)
+    if f.tell() == 0:
+        writer.writerow(["User", "Date", "Time"])
+
+# Ensure points file exists with headers
+with open(POINTS_FILE, "a", newline="") as f:
+    writer = csv.writer(f)
+    if f.tell() == 0:
+        writer.writerow(["UserID", "Points"])  # ✅ Store ID, not names
+
+# Load and save helpers
+def load_kill_log():
+    if not os.path.exists(KILL_LOG_FILE):
+        return {}
+    with open(KILL_LOG_FILE, "r") as f:
+        return json.load(f)
+
+def save_kill_log(log):
+    with open(KILL_LOG_FILE, "w") as f:
+        json.dump(log, f, indent=4)
+
+# Dynamic attendance/absentee points
+ATTENDANCE_POINTS = 10
+ABSENTEE_PENALTY = 10
+
+def is_admin(interaction: discord.Interaction):
+    """Check if the user has the Admin role or administrator permission."""
+    return (
+        any(r.name == "Admin" for r in interaction.user.roles)
+        or interaction.user.guild_permissions.administrator
+    )
+
+async def resolve_name(guild, user_id: int):
+    """Resolve a user's display name from cache or via API (safe fallback)."""
+    if guild is None:
+        return f"Unknown ({user_id})"
+    member = guild.get_member(user_id)
+    if member:
+        return member.display_name
+    try:
+        member = await guild.fetch_member(user_id)
+        return member.display_name
+    except discord.NotFound:
+        return f"Unknown ({user_id})"
+    except Exception:
+        return f"Unknown ({user_id})"
+
+# ----------------- Utility functions -----------------
+def update_points(user_id, points_to_add=10):
+    users = {}
+    with open(POINTS_FILE, "r") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            users[int(row["UserID"])] = int(row["Points"])
+
+    users[user_id] = users.get(user_id, 0) + points_to_add
+
+    with open(POINTS_FILE, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["UserID", "Points"])
+        for uid, points in users.items():
+            writer.writerow([uid, points])
+
+def get_points(user_id):
+    with open(POINTS_FILE, "r") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if int(row["UserID"]) == user_id:
+                return int(row["Points"])
+    return 0
+
+
+# ----------------- Attendance System -----------------
+class AttendanceView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.attendees = []
+
+    @discord.ui.button(label="Join", style=discord.ButtonStyle.success, custom_id="join_btn")
+    async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = interaction.user.id
+        user_display = interaction.user.display_name
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        # Prevent duplicate join today
+        if any(a["user_id"] == user_id and a["date"] == today for a in self.attendees):
+            await interaction.response.send_message("⚠️ You already joined today!", ephemeral=True)
+            return
+
+        now = datetime.now().strftime("%H:%M:%S")
+        self.attendees.append({"user_id": user_id, "date": today, "time": now})
+
+        with open(ATTENDANCE_FILE, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([user_display, today, now])
+
+        update_points(user_id, ATTENDANCE_POINTS)
+        total = get_points(user_id)
+
+        if points_panel_view:
+            await points_panel_view.update_leaderboard(updated_by=interaction.user)
+
+        # Update embed
+        embed = interaction.message.embeds[0]
+        attendees_list = "\n".join([
+            f"• {interaction.guild.get_member(a['user_id']).display_name}"
+            for a in self.attendees if a["date"] == today
+        ])
+        embed.set_field_at(0, name=f"Attendees ({len(self.attendees)})", value=attendees_list or "No attendees yet",
+                           inline=False)
+
+        await interaction.message.edit(embed=embed, view=self)
+        await interaction.response.send_message(
+            f"✅ You joined attendance and earned {ATTENDANCE_POINTS} points (Total: {total}).", ephemeral=True)
+
+    @discord.ui.button(label="Close Attendance", style=discord.ButtonStyle.danger, custom_id="close_btn")
+    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ Only admins can close attendance.", ephemeral=True)
+            return
+
+        guild = interaction.guild
+        today = datetime.now().strftime("%Y-%m-%d")
+        attendees_today_ids = [a["user_id"] for a in self.attendees if a["date"] == today]
+
+        absentees = []
+        for member in guild.members:
+            if not member.bot and member.id not in attendees_today_ids:
+                absentees.append(member.display_name)
+                update_points(member.id, -ABSENTEE_PENALTY)
+
+        # Update embed
+        embed = interaction.message.embeds[0]
+        embed.title = "📋 Attendance (Closed)"
+        self.clear_items()
+        await interaction.message.edit(embed=embed, view=self)
+
+        if points_panel_view:
+            await points_panel_view.update_leaderboard(updated_by="Attendance")
+
+        # Summary (admin only)
+        await interaction.response.send_message(
+            f"📋 Attendance closed.\n✅ Present: {len(attendees_today)}\n❌ Absent: {len(absentees)} (−{ABSENTEE_PENALTY} each)",
+            ephemeral=True
+        )
+
+
+# ----------------- Bot Events -----------------
+# ----------------- Attendance Commands -----------------
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def startattendance(ctx):
+    embed = discord.Embed(title="📋Guild Dungeon Attendance", description=f"Created by: {ctx.author.display_name}",
+                          color=discord.Color.blue())
+    embed.add_field(name="Attendees (0)", value="No attendees yet", inline=False)
+    view = AttendanceView()
+    await ctx.send(embed=embed, view=view)
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def setattendancepoints(ctx, amount: int):
+    global ATTENDANCE_POINTS
+    ATTENDANCE_POINTS = amount
+    await ctx.send(f"✅ Attendance reward points set to {amount}.")
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def setabsenteepoints(ctx, amount: int):
+    global ABSENTEE_PENALTY
+    ABSENTEE_PENALTY = amount
+    await ctx.send(f"✅ Absentee penalty points set to {amount}.")
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def showsettings(ctx):
+    await ctx.send(
+        f"⚙️ Current settings:\nAttendance reward: {ATTENDANCE_POINTS}\nAbsentee penalty: {ABSENTEE_PENALTY}")
+
+
+# ----------------- Dropdown + Modal Combo -----------------
+class PointsAmountModal(discord.ui.Modal, title="Enter Points"):
+    def __init__(self, member, mode):
+        super().__init__()
+        self.member = member  # member object
+        self.mode = mode
+        self.amount = discord.ui.TextInput(label="Amount", placeholder="Enter number of points")
+        self.add_item(self.amount)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        amt = int(self.amount.value)
+        if self.mode == "add":
+            update_points(self.member.id, amt)
+            result = f"✅ Added {amt} points to {self.member.display_name}."
+        elif self.mode == "remove":
+            update_points(self.member.id, -amt)
+            result = f"✅ Removed {amt} points from {self.member.display_name}."
+        elif self.mode == "set":
+            update_points(self.member.id, -get_points(self.member.id))
+            update_points(self.member.id, amt)
+            result = f"✅ {self.member.display_name}'s points set to {amt}."
+
+        total = get_points(self.member.id)
+        await interaction.response.send_message(f"{result} (Total: {total})", ephemeral=True)
+
+
+class MemberSelect(discord.ui.Select):
+    def __init__(self, matches, mode):
+        # Use member.id as value to keep everything unique
+        options = [
+            discord.SelectOption(label=m.display_name, value=str(m.id))
+            for m in matches[:25]
+        ]
+        super().__init__(placeholder="Select a member...", options=options)
+        self.mode = mode
+
+    async def callback(self, interaction: discord.Interaction):
+        selected_id = int(self.values[0])
+        member = interaction.guild.get_member(selected_id)
+        if not member:
+            await interaction.response.send_message("❌ Could not find this member.", ephemeral=True)
+            return
+        await interaction.response.send_modal(PointsAmountModal(member, self.mode))
+
+
+class MemberSelectView(discord.ui.View):
+    def __init__(self, matches, mode):
+        super().__init__(timeout=30)
+        self.add_item(MemberSelect(matches, mode))
+
+async def ask_for_member_with_callback(interaction: discord.Interaction, mode, panel_view):
+    modal = discord.ui.Modal(title="Member, Points & Reason")
+
+    name_box = discord.ui.TextInput(
+        label="Discord Nickname or Username",
+        placeholder="Enter nickname or username"
+    )
+    amount_box = discord.ui.TextInput(
+        label="Points",
+        placeholder="Enter number of points"
+    )
+    reason_box = discord.ui.TextInput(
+        label="Reason",
+        placeholder="Enter reason for adding/deducting points (e.g., attendance, event win, penalty)"
+    )
+
+    modal.add_item(name_box)
+    modal.add_item(amount_box)
+    modal.add_item(reason_box)
+
+    async def on_submit(interaction2: discord.Interaction):
+        member_name = name_box.value.strip()
+
+        # ✅ Resolve member by nickname or username (case-insensitive)
+        member = discord.utils.find(
+            lambda m: m.display_name.lower() == member_name.lower() or m.name.lower() == member_name.lower(),
+            interaction2.guild.members
+        )
+        if not member:
+            await interaction2.response.send_message(
+                f"❌ Could not find user `{member_name}` in this server.",
+                ephemeral=True
+            )
+            return
+
+        try:
+            amount = int(amount_box.value)
+        except ValueError:
+            await interaction2.response.send_message("❌ Points must be a number.", ephemeral=True)
+            return
+
+        reason = reason_box.value.strip() or "No reason provided"
+
+        # ✅ Update points using member.id
+        if mode == "add":
+            update_points(member.id, amount)
+            msg = f"✅ Added {amount} points to {member.display_name}."
+        elif mode == "remove":
+            update_points(member.id, -amount)
+            msg = f"✅ Removed {amount} points from {member.display_name}."
+        elif mode == "set":
+            update_points(member.id, -get_points(member.id))
+            update_points(member.id, amount)
+            msg = f"✅ {member.display_name}'s points set to {amount}."
+
+        total = get_points(member.id)
+
+        # Acknowledge silently
+        await interaction2.response.defer(ephemeral=True)
+
+        # ✅ Log to pointspanel-log with reason
+        await log_to_pointspanel(
+            interaction2,
+            f"📝 **{interaction2.user.display_name}** {mode} points for **{member.display_name}** by {amount}. "
+            f"**Reason:** {reason}. (New total: {total})"
+        )
+
+        # ✅ Refresh leaderboard in real time
+        if points_panel_view:
+            await points_panel_view.update_leaderboard(updated_by=interaction2.user)
+
+    modal.on_submit = on_submit
+    await interaction.response.send_modal(modal)
+
+
+async def generate_leaderboard_page(page=0, per_page=25, guild=None):
+    """
+    Async: returns (leaderboard_text, total_pages).
+    Resolves display names via resolve_name(guild, user_id).
+    """
+    users = []
+    if not os.path.exists(POINTS_FILE):
+        return ("No users found.", 1)
+
+    with open(POINTS_FILE, "r") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                users.append((int(row["UserID"]), int(row["Points"])))
+            except Exception:
+                continue
+
+    users.sort(key=lambda x: x[1], reverse=True)
+    total_pages = (len(users) - 1) // per_page + 1 if users else 1
+
+    start = page * per_page
+    end = start + per_page
+    sliced = users[start:end]
+
+    if not sliced:
+        return "No users found.", total_pages
+
+    table = ""
+    for idx, (uid, p) in enumerate(sliced, start=start + 1):
+        if guild is not None:
+            name = await resolve_name(guild, uid)
+        else:
+            name = f"Unknown ({uid})"
+        table += f"{idx:>2}. {name:<20} {p}\n"
+
+    return f"```{table}```", total_pages
+
+
+class PointsPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.message = None
+        self.showing = True
+        self.page = 0
+        self.per_page = 25
+        self.last_updated_by = None
+
+    async def update_leaderboard(self, updated_by=None):
+        """Refresh leaderboard and show who made the last change."""
+        if updated_by:
+            if hasattr(updated_by, "display_name"):
+                self.last_updated_by = updated_by.display_name
+            else:
+                self.last_updated_by = str(updated_by)
+            self.last_update_time = datetime.now()
+
+        if not self.message:
+            return
+
+        embed = self.message.embeds[0]
+        if self.showing:
+            lb_text, total_pages = await generate_leaderboard_page(
+                self.page, self.per_page, guild=self.message.guild
+            )
+            footer_text = f"_Page {self.page + 1}/{total_pages}_"
+            if self.last_updated_by:
+                ts = self.last_update_time.strftime("%Y-%m-%d %H:%M:%S")
+                footer_text += f"\n_Last updated by: {self.last_updated_by} at {ts}_"
+
+            embed.description = (
+                f"Use the buttons below to manage points and settings.\n\n"
+                f"**Current Points:**\n{lb_text}\n{footer_text}"
+            )
+        else:
+            embed.description = "Use the buttons below to manage points and settings.\n\n(Leaderboard hidden)"
+
+        await self.message.edit(embed=embed, view=self)
+
+
+    @discord.ui.button(label="➕ Add Points", style=discord.ButtonStyle.green, row=0)
+    async def add_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await ask_for_member_with_callback(interaction, "add", self)
+
+    @discord.ui.button(label="➖ Remove Points", style=discord.ButtonStyle.red, row=0)
+    async def remove_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await ask_for_member_with_callback(interaction, "remove", self)
+
+    @discord.ui.button(label="🎯 Set Points", style=discord.ButtonStyle.blurple, row=0)
+    async def set_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await ask_for_member_with_callback(interaction, "set", self)
+
+    @discord.ui.button(label="📊 Toggle Leaderboard", style=discord.ButtonStyle.gray, row=1)
+    async def toggle_lb(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.showing = not self.showing
+        self.page = 0
+        await self.update_leaderboard(updated_by=interaction.user.display_name)
+        await interaction.response.defer()
+
+    @discord.ui.button(label="⬅️ Prev", style=discord.ButtonStyle.secondary, row=1)
+    async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.page > 0:
+            self.page -= 1
+            await self.update_leaderboard(updated_by=interaction.user.display_name)
+        await interaction.response.defer()
+
+    @discord.ui.button(label="➡️ Next", style=discord.ButtonStyle.secondary, row=1)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Determine total pages asynchronously (message may be None if not yet set)
+        _, total_pages = await generate_leaderboard_page(self.page, self.per_page,
+                                                         guild=self.message.guild if self.message else None)
+        if self.page < total_pages - 1:
+            self.page += 1
+            await self.update_leaderboard(updated_by=interaction.user.display_name)
+        await interaction.response.defer()
+
+    @discord.ui.button(label="⚙️ Set Attendance Points", style=discord.ButtonStyle.blurple, row=2)
+    async def set_att_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = discord.ui.Modal(title="Set Attendance Points")
+        amount = discord.ui.TextInput(label="Amount", placeholder="Enter points for attendance")
+        modal.add_item(amount)
+
+        async def on_submit(interaction2: discord.Interaction):
+            global ATTENDANCE_POINTS
+            ATTENDANCE_POINTS = int(amount.value)
+            await interaction2.response.send_message(
+                f"✅ Attendance reward points set to {ATTENDANCE_POINTS}.",
+                ephemeral=True
+            )
+            await self.update_leaderboard(updated_by=interaction2.user.display_name)
+            await log_to_pointspanel(interaction2,
+                                     f"⚙️ **{interaction2.user.display_name}** set attendance reward to **{ATTENDANCE_POINTS}**.")
+
+        modal.on_submit = on_submit
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="⚙️ Set Absentee Points", style=discord.ButtonStyle.blurple, row=2)
+    async def set_abs_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = discord.ui.Modal(title="Set Absentee Points")
+        amount = discord.ui.TextInput(label="Amount", placeholder="Enter points to deduct")
+        modal.add_item(amount)
+
+        async def on_submit(interaction2: discord.Interaction):
+            global ABSENTEE_PENALTY
+            ABSENTEE_PENALTY = int(amount.value)
+            await interaction2.response.send_message(
+                f"✅ Absentee penalty points set to {ABSENTEE_PENALTY}.",
+                ephemeral=True
+            )
+            await self.update_leaderboard(updated_by=interaction2.user.display_name)
+            await log_to_pointspanel(interaction2,
+                                     f"⚙️ **{interaction2.user.display_name}** set absentee penalty to **{ABSENTEE_PENALTY}**.")
+
+        modal.on_submit = on_submit
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="📖 Show Settings", style=discord.ButtonStyle.blurple, row=2)
+    async def show_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            f"⚙️ Current settings:\nAttendance reward: {ATTENDANCE_POINTS}\nAbsentee penalty: {ABSENTEE_PENALTY}",
+            ephemeral=True
+        )
+
+global points_panel_view  # add this line at the top of your file
+points_panel_view = None  # initialize
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def pointspanel(ctx):
+    global points_panel_view
+    view = PointsPanel()
+    embed = discord.Embed(
+        title="📊 Points Management",
+        description="Use the buttons below to manage points and settings.\n\nLoading leaderboard...",
+        color=discord.Color.purple()
+    )
+    message = await ctx.send(embed=embed, view=view)
+    view.message = message
+    points_panel_view = view  # ✅ store reference globally
+    await view.update_leaderboard()
+
+
+async def log_to_pointspanel(ctx_or_interaction, message: str):
+    """Send a log message to #pointspanel-log channel if it exists."""
+    guild = ctx_or_interaction.guild if hasattr(ctx_or_interaction, "guild") else None
+    if guild:
+        channel = discord.utils.get(guild.text_channels, name="pointspanel-log")
+        if channel:
+            await channel.send(message)
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def cleanpoints(ctx):
+    """Convert old username-based points.csv to ID-based and merge duplicates."""
+    guild = ctx.guild
+    users = {}
+
+    # ✅ Load and convert points
+    with open(POINTS_FILE, "r") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            user_key = row.get("UserID") or row.get("User")  # Support old files
+            points = int(row["Points"])
+
+            if row.get("UserID"):
+                # Already ID-based
+                user_id = int(user_key)
+            else:
+                # Old username-based → find member in guild
+                member = discord.utils.find(
+                    lambda m: m.name == user_key or (m.nick and m.nick == user_key),
+                    guild.members
+                )
+                if member:
+                    user_id = member.id
+                else:
+                    # Cannot find member → skip or fallback?
+                    continue
+
+            if user_id in users:
+                users[user_id] += points
+            else:
+                users[user_id] = points
+
+    # ✅ Write cleaned & migrated data back
+    with open(POINTS_FILE, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["UserID", "Points"])
+        for uid, pts in users.items():
+            writer.writerow([uid, pts])
+
+    await ctx.send(f"✅ Points file cleaned, migrated to ID-based format, and duplicates merged. {len(users)} unique users remain.")
+
+
+
+# ----------------- Roll Timer -----------------
+class RollView(discord.ui.View):
+    def __init__(self, duration):
+        super().__init__(timeout=duration)
+        self.rolls = {}
+
+    @discord.ui.button(label="🎲 Roll", style=discord.ButtonStyle.green, custom_id="roll_button")
+    async def roll_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user = interaction.user.display_name
+
+        if user in self.rolls:
+            await interaction.response.send_message(
+                f"⚠️ {user}, you already rolled **{self.rolls[user]}**."
+            )
+            return
+
+        score = random.randint(0, 100)
+        self.rolls[user] = score
+
+        await interaction.response.send_message(
+            f"🎲 {user} rolled **{score}**!"
+        )
+
+    async def on_timeout(self):
+        # Called automatically when timer runs out
+        if not self.rolls:
+            result = "❌ No one rolled this time."
+        else:
+            winner, score = max(self.rolls.items(), key=lambda x: x[1])
+            result = f"🏆 Roll event ended! Winner: **{winner}** with a roll of **{score}** 🎉"
+
+        # Edit the original message to show results
+        for child in self.children:
+            child.disabled = True
+        await self.message.edit(content=result, view=self)
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def startroll(ctx, time_in_seconds: int):
+    """Start a roll event with button. Ends after given time."""
+    view = RollView(duration=time_in_seconds)
+    embed = discord.Embed(
+        title="🎲 Roll Event",
+        description=f"Press the button below to roll (0–100).\n"
+                    f"Event ends in **{time_in_seconds} seconds**!",
+        color=discord.Color.blue()
+    )
+    msg = await ctx.send(embed=embed, view=view)
+    view.message = msg  # Keep reference so we can edit later
+
+    # Wait for the timer
+    await asyncio.sleep(time_in_seconds)
+
+    # Determine results
+    if not view.rolls:
+        result = "❌ No one rolled this time."
+    else:
+        winner, score = max(view.rolls.items(), key=lambda x: x[1])
+        result = f"🏆 Roll event ended! Winner: **{winner}** with a roll of **{score}** 🎉"
+
+    # Disable the button in the original message
+    for child in view.children:
+        child.disabled = True
+    await msg.edit(view=view)  # keep the embed but disable the button
+
+    # Send results as a NEW message
+    if not view.rolls:
+        await ctx.send("❌ No one rolled this time.")
+    else:
+        winner, score = max(view.rolls.items(), key=lambda x: x[1])
+        await ctx.send(f"🏆 Roll event ended! Winner: **{winner}** with a roll of **{score}** 🎉")
+
+
+# ----------------- Reset Attendance Command -----------------
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def resetattendance(ctx):
+    """Reset today's attendance so members can join again."""
+    async for message in ctx.channel.history(limit=50):
+        if message.author == bot.user and message.embeds:
+            for view in bot.persistent_views:
+                if isinstance(view, AttendanceView):
+                    view.attendees.clear()  # reset in-memory list
+                    await ctx.send("✅ Attendance has been reset. Everyone can join again today.")
+                    return
+    await ctx.send("⚠️ No active attendance panel found to reset.")
+
+
+# ----------------- Leaderboard with Pagination -----------------
+class LeaderboardView(discord.ui.View):
+    def __init__(self, pages):
+        super().__init__(timeout=60)
+        self.pages = pages
+        self.current = 0
+
+    @discord.ui.button(label="⬅️", style=discord.ButtonStyle.secondary)
+    async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current > 0:
+            self.current -= 1
+            await interaction.response.edit_message(embed=self.pages[self.current], view=self)
+
+    @discord.ui.button(label="➡️", style=discord.ButtonStyle.secondary)
+    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current < len(self.pages) - 1:
+            self.current += 1
+            await interaction.response.edit_message(embed=self.pages[self.current], view=self)
+
+
+@bot.command()
+async def leaderboard(ctx):
+    """Show the top users by points with resolved display names."""
+    if not os.path.exists(POINTS_FILE):
+        await ctx.send("❌ No points data yet.")
+        return
+
+    users = []
+    with open(POINTS_FILE, "r") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                users.append((int(row["UserID"]), int(row["Points"])))
+            except Exception:
+                continue
+
+    users.sort(key=lambda x: x[1], reverse=True)
+
+    per_page = 20
+    pages = []
+    for i in range(0, len(users), per_page):
+        chunk = users[i:i + per_page]
+        desc_lines = []
+        for j, (uid, p) in enumerate(chunk):
+            name = await resolve_name(ctx.guild, uid)
+            desc_lines.append(f"{i + j + 1}. {name}\t:\t{p} pts")
+        desc = "\n".join(desc_lines) if desc_lines else "No data available."
+        embed = discord.Embed(title="🏆 Points Leaderboard", description=desc, color=discord.Color.gold())
+        embed.set_footer(text=f"Page {i // per_page + 1}/{(len(users) - 1) // per_page + 1}")
+        pages.append(embed)
+
+    if not pages:
+        await ctx.send("❌ No users found.")
+    elif len(pages) == 1:
+        await ctx.send(embed=pages[0])
+    else:
+        await ctx.send(embed=pages[0], view=LeaderboardView(pages))
+
+
+
+
+# ----------------- Bidding System -----------------
+class BidPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.current_bid = {
+            "item": None,
+            "highest_bid": 0,
+            "highest_bidder": None,
+            "min_bid": 0,
+            "active": False
+        }
+        self.message = None
+
+        # Save references to important buttons (decorator-created buttons live in self.children)
+        self.start_button = None
+        self.bid_button = None
+        # loop children now (they exist after super().__init__ when using @discord.ui.button)
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                if child.label == "🚀 Start Bid":
+                    self.start_button = child
+                elif child.label == "💸 Bid":
+                    self.bid_button = child
+
+        # If we didn't find them (defensive), try again later when message is set
+    def _ensure_buttons(self):
+        """Make sure start_button and bid_button are stored"""
+        if self.start_button and self.bid_button:
+            return
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                if child.label == "🚀 Start Bid" and not self.start_button:
+                    self.start_button = child
+                elif child.label == "💸 Bid" and not self.bid_button:
+                    self.bid_button = child
+
+    def build_embed(self):
+        desc = ""
+        if self.current_bid["active"]:
+            bidder_display = "None"
+            if self.current_bid["highest_bidder"]:
+                guild = self.message.guild if self.message else None
+                if guild:
+                    member = guild.get_member(self.current_bid["highest_bidder"])
+                    bidder_display = member.display_name if member else f"User ID: {self.current_bid['highest_bidder']}"
+                else:
+                    bidder_display = f"User ID: {self.current_bid['highest_bidder']}"
+
+            desc = (f"**Item:** {self.current_bid['item']}\n"
+                    f"**Minimum Bid:** {self.current_bid['min_bid']}\n"
+                    f"**Highest Bid:** {self.current_bid['highest_bid']} ({bidder_display})")
+        else:
+            desc = "No active bidding. Admins can start a bid."
+        return discord.Embed(title="💰 Bidding Panel", description=desc, color=discord.Color.gold())
+
+    async def refresh_message(self, source_message=None):
+        """Edit the original message to update embed + view.
+        Accepts a fallback source_message (modal interaction's message) when self.message isn't set."""
+        # ensure we have button refs
+        self._ensure_buttons()
+
+        target_message = self.message or source_message
+        if target_message:
+            try:
+                await target_message.edit(embed=self.build_embed(), view=self)
+            except Exception:
+                # best-effort: ignore edit errors (discord can sometimes reject duplicate edits)
+                pass
+
+    @discord.ui.button(label="🚀 Start Bid", style=discord.ButtonStyle.green, row=0)
+    async def start_bid(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ Only admins can start bids.", ephemeral=True)
+            return
+        if self.current_bid["active"]:
+            await interaction.response.send_message(
+                f"⚠️ A bid for **{self.current_bid['item']}** is already active. Wait for it to finish.",
+                ephemeral=True
+            )
+            return
+
+        modal = discord.ui.Modal(title="Start a Bid")
+        item_input = discord.ui.TextInput(label="Item Name", placeholder="Enter item for bidding")
+        min_bid_input = discord.ui.TextInput(label="Minimum Bid", placeholder="e.g. 50")
+        time_input = discord.ui.TextInput(label="Duration (seconds)", placeholder="e.g. 60")
+        modal.add_item(item_input)
+        modal.add_item(min_bid_input)
+        modal.add_item(time_input)
+
+        async def on_submit(interaction2: discord.Interaction):
+            # use the modal interaction as fallback for message edits
+            source_msg = getattr(interaction2, "message", None)  # should be the original component message
+            try:
+                min_bid = int(min_bid_input.value)
+                duration = int(time_input.value)
+            except ValueError:
+                await interaction2.response.send_message("❌ Duration and minimum bid must be numbers.", ephemeral=True)
+                return
+
+            self.current_bid = {
+                "item": item_input.value,
+                "highest_bid": 0,
+                "highest_bidder": None,
+                "min_bid": min_bid,
+                "active": True
+            }
+
+            # ensure we have refs to buttons
+            self._ensure_buttons()
+
+            # enable the bid button and optionally disable start button
+            if self.bid_button:
+                self.bid_button.disabled = False
+            if self.start_button:
+                self.start_button.disabled = True
+
+            # reply to the modal submit
+            await interaction2.response.send_message(
+                f"✅ Bidding started for **{item_input.value}** with minimum bid **{min_bid}**!",
+                ephemeral=False
+            )
+
+            # refresh the original panel message (use stored message if available, otherwise use the modal's message)
+            await self.refresh_message(source_message=source_msg)
+
+            # Auto-close after duration (run in background task)
+            await asyncio.sleep(duration)
+            if self.current_bid["active"]:
+                # use channel from the interaction2 (modal), fallback to stored message guild channel
+                channel = interaction2.channel or (self.message.channel if self.message else None)
+                if channel:
+                    await self.end_bidding(channel)
+
+        modal.on_submit = on_submit
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="💸 Bid", style=discord.ButtonStyle.blurple, row=0, disabled=True)
+    async def place_bid(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.current_bid["active"]:
+            await interaction.response.send_message("❌ No active bidding right now.", ephemeral=True)
+            return
+
+        modal = discord.ui.Modal(title="Place Your Bid")
+        amount_input = discord.ui.TextInput(label="Bid Amount", placeholder="Enter bid amount")
+        modal.add_item(amount_input)
+
+        async def on_submit(interaction2: discord.Interaction):
+            user_id = interaction2.user.id
+            try:
+                amount = int(amount_input.value)
+            except ValueError:
+                await interaction2.response.send_message("❌ Bid must be a number.", ephemeral=True)
+                return
+
+            # minimum bid check
+            if amount < self.current_bid["min_bid"]:
+                await interaction2.response.send_message(
+                    f"⚠️ Your bid must be at least {self.current_bid['min_bid']}.",
+                    ephemeral=True
+                )
+                return
+
+            if amount <= self.current_bid["highest_bid"]:
+                await interaction2.response.send_message(
+                    f"⚠️ Your bid must be higher than the current highest bid ({self.current_bid['highest_bid']}).",
+                    ephemeral=True
+                )
+                return
+
+            user_points = get_points(user_id)
+            if amount > user_points:
+                await interaction2.response.send_message(
+                    f"❌ You don’t have enough points. You have {user_points} points.",
+                    ephemeral=True
+                )
+                return
+
+            self.current_bid["highest_bid"] = amount
+            self.current_bid["highest_bidder"] = user_id
+
+            await interaction2.response.send_message(
+                f"✅ You are now the highest bidder with {amount} points!",
+                ephemeral=True
+            )
+            await interaction2.channel.send(
+                f"💸 {interaction2.user.mention} bid **{amount} points** for **{self.current_bid['item']}**!"
+            )
+
+            # refresh the original panel message; modal interaction has message attribute referencing original component
+            await self.refresh_message(source_message=getattr(interaction2, "message", None))
+
+        modal.on_submit = on_submit
+        await interaction.response.send_modal(modal)
+
+    async def end_bidding(self, channel):
+        # ensure we have refs to buttons
+        self._ensure_buttons()
+
+        winner_id = self.current_bid["highest_bidder"]
+        winner_member = channel.guild.get_member(winner_id) if winner_id else None
+
+        # disable the bid button safely
+        if self.bid_button:
+            self.bid_button.disabled = True
+        if self.start_button:
+            self.start_button.disabled = False
+
+        if winner_member:
+            update_points(winner_id, -self.current_bid["highest_bid"])
+            total = get_points(winner_id)
+            result = (f"🏆 Bidding ended for **{self.current_bid['item']}**!\n"
+                      f"Winner: **{winner_member.display_name}** with {self.current_bid['highest_bid']} points.\n"
+                      f"Remaining balance: {total} points.")
+        else:
+            result = f"⚠️ Bidding for **{self.current_bid['item']}** ended. No bids were placed."
+
+        # mark as inactive and reset current bid (you can choose to reset or keep last item; here we keep item but mark inactive)
+        self.current_bid["active"] = False
+
+        await channel.send(result)
+
+        # refresh panel message (use stored message if available)
+        await self.refresh_message()
+
+        if points_panel_view:
+            await points_panel_view.update_leaderboard(updated_by="Bid System")
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def bidpanel(ctx):
+    view = BidPanel()
+    embed = view.build_embed()
+    msg = await ctx.send(embed=embed, view=view)
+    view.message = msg
+
+
+# ----------------- Download/Extract csv files -----------------
+@bot.command()
+@commands.has_any_role("Officer", "Admin")
+async def exportdata(ctx):
+    """Export attendance.csv and points.csv (Admin only)."""
+    files_to_send = []
+    if os.path.exists(ATTENDANCE_FILE):
+        files_to_send.append(discord.File(ATTENDANCE_FILE))
+    if os.path.exists(POINTS_FILE):
+        files_to_send.append(discord.File(POINTS_FILE))
+
+    if isinstance(error, commands.MissingAnyRole):
+        await ctx.send("❌ You must have the **Officer** or **Admin** role to use this command.")
+    else:
+        raise error
+
+    if files_to_send:
+        await ctx.send("📂 Here are the exported files:", files=files_to_send)
+    else:
+        await ctx.send("❌ No data files found.")
+
+
+
+# --- MERGED CONTENT FROM script.py END ---
+
 
 # --- DATA ---
 bosses = {}
@@ -637,6 +1607,14 @@ async def boss_tod_edit(ctx, name: str = None, *, new_time: str = None):
     bosses[name]["death_time"] = death_time
     bosses[name]["killed_by"] = ctx.author.id
 
+    # Log this kill for weekly statistics (use fresh current time)
+    kill_log = load_kill_log()
+    if b_name not in kill_log:
+        kill_log[b_name] = []
+
+    kill_log[b_name].append(now_click.isoformat())  # ✅ correct timestamp
+    save_kill_log(kill_log)
+
     # Clear any existing reminders for this boss
     reminder_sent.discard((name, "1h"))
     reminder_sent.discard((name, "15m"))
@@ -661,7 +1639,7 @@ async def boss_add_scheduled(ctx, *, args: str):
     Add a boss with scheduled spawn times
     Format: /test_add_schedule <name> <day> <time> [<day> <time> ...] OR /test_add_schedule <name> <time> [<time> ...]
     Examples:
-    - Weekly: /test_add_schedule Dragon Monday 2:30PM Wednesday 7:45PM
+    - Weekly: /boss_add_schedule Dragon Monday 2:30PM Wednesday 7:45PM
     - Daily: /test_add_schedule Dragon 11:00AM 8:00PM
     """
     try:
@@ -968,6 +1946,346 @@ async def boss_add_scheduled(ctx, *, args: str):
                     color=discord.Color.blue()
                 )
                 await ctx.send(embed=embed)
+
+@bot.command(name="boss_weekly_stats")
+async def boss_weekly_stats(ctx):
+    """
+    Show how many times each boss spawned this week.
+    - For unscheduled bosses: based on recorded kills (actual data)
+    - For scheduled bosses: based on weekly or daily schedule (predicted)
+    """
+    now = datetime.now(sg_timezone)
+    start_of_week = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    kill_log = load_kill_log()
+    boss_counts = {}
+    total_kills = 0
+
+    # ✅ Step 1: Count kills for unscheduled bosses
+    for boss_name, info in bosses.items():
+        is_scheduled = info.get("is_scheduled", False)
+        if not is_scheduled:
+            count = 0
+            for t in kill_log.get(boss_name, []):
+                try:
+                    dt = datetime.fromisoformat(t)
+                    if dt.tzinfo is None:
+                        dt = sg_timezone.localize(dt)
+                except Exception:
+                    continue
+                if dt >= start_of_week:
+                    count += 1
+            boss_counts[boss_name] = count
+            total_kills += count
+
+    # ✅ Step 2: Add predicted spawn counts for scheduled bosses
+    for boss_name, info in bosses.items():
+        if info.get("is_scheduled", False):
+            schedule = info.get("schedule", [])
+            is_daily = info.get("is_daily", False)
+            if is_daily:
+                # Daily schedule: number of times per day × 7 days
+                count = len(schedule) * 7
+            else:
+                # Weekly schedule: one per entry
+                count = len(schedule)
+            boss_counts[boss_name] = count
+            total_kills += count
+
+    # ✅ Step 3: Build the embed
+    embed = discord.Embed(
+        title="📊 Weekly Boss Spawn Summary",
+        description=f"**__Boss Spawns This Week__**\nTimezone: Asia/Singapore\n"
+                    f"Week starting {start_of_week.strftime('%B %d, %Y')}",
+        color=discord.Color.purple()
+    )
+
+    # Sort by count descending
+    for name, count in sorted(boss_counts.items(), key=lambda x: x[1], reverse=True):
+        if count > 0:
+            embed.add_field(name=f"⚔️ {name}", value=f"{count} spawns this week", inline=False)
+
+    embed.add_field(name="📅 Total Boss Spawns", value=f"**{total_kills}**", inline=False)
+
+    if total_kills == 0:
+        embed.description += "\n\n_No bosses have spawned yet this week._"
+
+    embed.set_footer(text="Includes actual kills for regular bosses and scheduled spawns for weekly/daily bosses.")
+    await ctx.send(embed=embed)
+
+@bot.command(name="boss_today")
+async def boss_today(ctx):
+    """
+    Shows all bosses that will spawn today — both scheduled and unscheduled.
+    Sorted by their spawn times in Singapore timezone.
+    """
+    now = datetime.now(sg_timezone)
+    today_name = now.strftime("%A")
+    today_bosses = []
+
+    for boss_name, info in bosses.items():
+        is_scheduled = info.get("is_scheduled", False)
+
+        # 🗓️ Scheduled bosses
+        if is_scheduled:
+            schedule = info.get("schedule", [])
+            is_daily = info.get("is_daily", False)
+
+            for day, time_str in schedule:
+                if is_daily or day == today_name:
+                    # Parse time safely
+                    time_str_clean = time_str.replace("AM", "").replace("PM", "").strip()
+                    time_parts = time_str_clean.split(":")
+                    hour = int(time_parts[0])
+                    minute = int(time_parts[1])
+
+                    # Adjust for AM/PM
+                    if "PM" in time_str and hour != 12:
+                        hour += 12
+                    if "AM" in time_str and hour == 12:
+                        hour = 0
+
+                    spawn_time = time(hour, minute)
+                    spawn_datetime = sg_timezone.localize(datetime.combine(now.date(), spawn_time))
+                    is_upcoming = spawn_datetime >= now
+
+                    today_bosses.append((boss_name, spawn_datetime, is_upcoming, "Scheduled"))
+
+        # ⚔️ Unscheduled bosses
+        else:
+            death_time = info.get("death_time")
+            respawn_time = info.get("respawn_time")
+
+            if not respawn_time:
+                continue  # skip if no respawn time set
+
+            # Calculate next respawn
+            if death_time:
+                if isinstance(death_time, str):
+                    death_time = datetime.fromisoformat(death_time)
+                    if death_time.tzinfo is None:
+                        death_time = sg_timezone.localize(death_time)
+                respawn_at = death_time + respawn_time
+            else:
+                # If never killed, assume already spawned
+                respawn_at = now
+
+            # Only include if it respawns today
+            if respawn_at.date() == now.date():
+                is_upcoming = respawn_at >= now
+                today_bosses.append((boss_name, respawn_at, is_upcoming, "Unscheduled"))
+
+    # 🕓 Sort all bosses by time
+    today_bosses.sort(key=lambda x: x[1])
+
+    # 🧾 Build embed
+    embed = discord.Embed(
+        title=f"📅 Bosses Spawning Today — {now.strftime('%A, %B %d, %Y')}",
+        description="Here’s today’s schedule for all bosses.",
+        color=discord.Color.gold(),
+        timestamp=now
+    )
+
+    if not today_bosses:
+        embed.add_field(
+            name="No Boss Spawns Today",
+            value="There are no bosses scheduled or expected to spawn today.",
+            inline=False
+        )
+    else:
+        for boss_name, spawn_dt, is_upcoming, boss_type in today_bosses:
+            time_str = spawn_dt.strftime("%I:%M %p")
+            status = "🕐 Upcoming" if is_upcoming else "✅ Already Spawned"
+            emoji = "🗓️" if boss_type == "Scheduled" else "⚔️"
+            embed.add_field(
+                name=f"{emoji} {boss_name}",
+                value=f"{status} — {time_str}",
+                inline=False
+            )
+
+    embed.set_footer(text="Timezone: Asia/Singapore (SGT)")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="boss_reset_after_maintenance")
+@commands.has_permissions(administrator=True)
+async def boss_reset_after_maintenance(ctx):
+    """
+    Resets all unscheduled (regular) bosses after maintenance.
+    Sends a single summary message with a button to re-post TOD buttons.
+    """
+    now = datetime.now(sg_timezone)
+    reset_count = 0
+    chat_channel = bot.get_channel(CHANNEL_ID)  # Make sure this points to your boss channel
+    reset_bosses = []
+
+    # Reset boss data
+    for boss_name, info in bosses.items():
+        is_scheduled = info.get("is_scheduled", False)
+        if not is_scheduled:
+            info["death_time"] = None
+            info["killed_by"] = None
+            info["spawn_time"] = now
+            reset_bosses.append(boss_name)
+            reset_count += 1
+
+    await save_bosses()
+
+    # Optional: clear weekly kill log
+    if os.path.exists(KILL_LOG_FILE):
+        with open(KILL_LOG_FILE, "w") as f:
+            f.write("{}")
+
+    # ✅ Create a single embed summarizing the reset
+    boss_list_str = "\n".join([f"• **{b}**" for b in reset_bosses]) or "_No unscheduled bosses found._"
+
+    embed = discord.Embed(
+        title="🛠️ Boss Reset After Maintenance",
+        description=(
+            f"All **{reset_count} unscheduled bosses** have been reset.\n"
+            f"They are now considered **spawned** and can be marked again after kills.\n\n"
+            f"**Respawned Bosses:**\n{boss_list_str}\n\n"
+            f"Click the button below to post TOD buttons for all bosses."
+        ),
+        color=discord.Color.orange(),
+        timestamp=now
+    )
+    embed.set_footer(text=f"Triggered by {ctx.author.display_name}")
+
+    # 🧩 Create button for generating TOD messages
+    view = View(timeout=None)
+
+    async def generate_tod_buttons(interaction):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("🚫 Only admins can use this.", ephemeral=True)
+            return
+
+        await interaction.response.send_message("🕒 Posting TOD buttons...", ephemeral=True)
+
+        for boss_name in reset_bosses:
+            view_inner = View(timeout=None)
+            tod_button = Button(label=f"Time of Death {boss_name}", style=discord.ButtonStyle.danger)
+
+            async def button_callback(interaction, b_name=boss_name, ch=chat_channel):
+                now_click = datetime.now(sg_timezone)
+                bosses[b_name]["death_time"] = now_click
+                bosses[b_name]["killed_by"] = interaction.user.id
+                await save_bosses()
+
+                # Record in kill log
+                kill_log = load_kill_log()
+                if b_name not in kill_log:
+                    kill_log[b_name] = []
+                kill_log[b_name].append(now_click.isoformat())
+                save_kill_log(kill_log)
+
+                respawn_at_new = now_click + bosses[b_name]["respawn_time"]
+                await ch.send(
+                    f"⚔️ Boss '{b_name}' marked dead by {interaction.user.mention} at "
+                    f"{now_click.strftime('%m-%d-%Y %I:%M %p')}.\n"
+                    f"Respawns at: {respawn_at_new.strftime('%m-%d-%Y %I:%M %p')}"
+                )
+                try:
+                    await interaction.response.send_message("✅ Time of Death recorded.", ephemeral=True)
+                except:
+                    pass
+
+                # Clear reminders and refresh embeds
+                reminder_sent.discard((b_name, "1h"))
+                reminder_sent.discard((b_name, "15m"))
+                reminder_sent.discard((b_name, "5m"))
+                reminder_sent.discard((b_name, "respawn"))
+
+                try:
+                    await interaction.message.edit(view=None)
+                except:
+                    pass
+
+                await refresh_status_message()
+
+            tod_button.callback = button_callback
+            view_inner.add_item(tod_button)
+
+            # Send respawn message for this boss
+            await chat_channel.send(
+                f"✅ **ATTENTION!** @everyone __**{boss_name}**__ has respawned! Time to hunt!",
+                view=view_inner
+            )
+
+        await refresh_status_message()
+
+    generate_button = Button(label="Generate TOD Buttons", style=discord.ButtonStyle.success)
+    generate_button.callback = generate_tod_buttons
+    view.add_item(generate_button)
+
+    # Send summary + generate button
+    await ctx.send(embed=embed, view=view)
+
+
+
+@bot.command(name="help")
+async def help(ctx):
+    """
+    Shows a list of all available bot commands and their usage.
+    """
+    embed = discord.Embed(
+        title="📘 Celestial Boss Bot — Help Menu",
+        description="Here are all available commands and what they do:",
+        color=discord.Color.blue()
+    )
+
+    # ⚙️ General Commands
+    embed.add_field(
+        name="⚙️ General Commands",
+        value=(
+            "`!help` — Show this help menu.\n"
+            "`!boss_weekly_stats` — Show how many bosses spawned this week.\n"
+            "`!boss_reset_after_maintenance` — Reset all unscheduled bosses after server maintenance.\n"
+        ),
+        inline=False
+    )
+
+    # 🪓 Boss Management Commands
+    embed.add_field(
+        name="🪓 Boss Tracking Commands",
+        value=(
+            "`!boss_add <name> <respawn_hours>` — Add a new regular boss.\n"
+            "`!boss_delete <name>` — Remove a boss from tracking.\n"
+            "`!boss_tod_edit <name>` — Manually set or edit a boss's time of death.\n"
+            "`Example:` — boss_tod_edit Amentis 10-05-2025 01:15 PM\n"
+
+        ),
+        inline=False
+    )
+
+    # ⏰ Status and Notifications
+    embed.add_field(
+        name="⏰ Status & Notifications",
+        value=(
+            "`!boss_status` — Force-refresh the boss status embed manually.\n"
+        ),
+        inline=False
+    )
+
+    # 🗓️ Scheduled Bosses
+    embed.add_field(
+        name="🗓️ Scheduled Boss Commands",
+        value=(
+            "`!boss_add_schedule <name> <day/time>` — Add a weekly or daily scheduled boss.\n"
+            "`Example`: !boss_add_schedule Dragon Monday 2:30PM Wednesday 7:45PM\n"
+        ),
+        inline=False
+    )
+
+    # 🧠 Note / Footer
+    embed.set_footer(
+        text="Use commands without <>. Example: !boss_tod_edit Venatus"
+    )
+
+    await ctx.send(embed=embed)
+
+
+
 # We need to modify the boss_respawn_notifications function to properly handle respawn alerts
 # --- BOSS RESPAWN NOTIFICATIONS (NO AUTO REFRESH) ---
 @tasks.loop(seconds=5)  # 5 seconds for better precision
@@ -1024,14 +2342,7 @@ async def boss_respawn_notifications():
                     day_idx = days.index(day)
                     current_day_idx = now.weekday()
 
-                    days_ahead = day_idx - current_day_idx
-                    if days_ahead < 0 or (days_ahead == 0 and now.time() > time(hour, minute)):
-                        # Target day already happened this week or time already passed today
-                        days_ahead += 7
-
-                    target_date = now + timedelta(days=days_ahead)
-
-                    # Parse 12-hour format time
+                    # ✅ Parse 12-hour format time BEFORE using hour/minute
                     time_str_clean = time_str.replace("AM", "").replace("PM", "")
                     time_parts = time_str_clean.split(":")
                     hour = int(time_parts[0])
@@ -1043,6 +2354,13 @@ async def boss_respawn_notifications():
                     # Adjust for AM (12AM becomes 0)
                     if "AM" in time_str and hour == 12:
                         hour = 0
+
+                    days_ahead = day_idx - current_day_idx
+                    if days_ahead < 0 or (days_ahead == 0 and now.time() > time(hour, minute)):
+                        # Target day already happened this week or time already passed today
+                        days_ahead += 7
+
+                    target_date = now + timedelta(days=days_ahead)
 
                     target_time = time(hour, minute)
                     candidate = sg_timezone.localize(
@@ -1140,6 +2458,15 @@ async def boss_respawn_notifications():
                     now_click = datetime.now(sg_timezone)
                     bosses[b_name]["death_time"] = now_click
                     bosses[b_name]["killed_by"] = interaction.user.id
+
+                    # Log this kill for weekly statistics (use fresh current time)
+                    kill_log = load_kill_log()
+                    if b_name not in kill_log:
+                        kill_log[b_name] = []
+
+                    kill_log[b_name].append(now_click.isoformat())  # ✅ correct timestamp
+                    save_kill_log(kill_log)
+
                     await save_bosses()
 
                     respawn_at_new = now_click + bosses[b_name]["respawn_time"]
@@ -1305,9 +2632,7 @@ async def daily_announcement():
                 embed.add_field(
                     name="💡 Today's Reminders",
                     value="• 1-hour, 15-minute, and 5-minute reminders will be sent automatically\n"
-                          "• Use `/boss_alive` to check currently spawned bosses\n"
-                          "• Use `/boss_status` for full schedule\n"
-                          "• Use `/boss_daily` to check today's respawns anytime",
+                          "• Use `/boss_status` for full schedule\n",
                     inline=False
                 )
 
@@ -1334,6 +2659,19 @@ async def daily_announcement():
 @bot.event
 async def on_ready():
     print(f"Bot logged in as {bot.user}")
+    # Register persistent views from merged script.py features
+    try:
+        bot.add_view(AttendanceView())
+    except Exception:
+        pass
+    try:
+        bot.add_view(PointsPanel())
+    except Exception:
+        pass
+    try:
+        bot.add_view(BidPanel())
+    except Exception:
+        pass
     load_bosses()
     # Only start the notification task, not auto-refresh
     boss_respawn_notifications.start()
