@@ -42,7 +42,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True  # 👈 required for get_member and guild.members to work
 intents.guilds = True
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+bot = commands.Bot(command_prefix="/", intents=intents, help_command=None)
 
 # --- MERGED CONTENT FROM script.py START ---
 
@@ -1584,16 +1584,20 @@ async def boss_status(ctx):
 
 @bot.command(name="boss_tod_edit")
 async def boss_tod_edit(ctx, name: str = None, *, new_time: str = None):
+    """Manually update a boss's time of death."""
     if not name or name not in bosses:
         await ctx.send(f"❌ Boss '{name}' not found.")
         return
 
-    # For scheduled bosses, we shouldn't update death_time as they respawn on schedule
+    # Prevent editing scheduled bosses
     if bosses[name].get("is_scheduled", False):
         await ctx.send(
-            f"❌ Cannot update Time of Death for scheduled boss '{name}'. Scheduled bosses respawn automatically based on their schedule.")
+            f"❌ Cannot update Time of Death for scheduled boss '{name}'. "
+            f"Scheduled bosses respawn automatically based on their schedule."
+        )
         return
 
+    # Parse the new time if provided, otherwise use current time
     if new_time:
         try:
             naive_dt = datetime.strptime(new_time, "%m-%d-%Y %I:%M %p")
@@ -1604,18 +1608,18 @@ async def boss_tod_edit(ctx, name: str = None, *, new_time: str = None):
     else:
         death_time = datetime.now(sg_timezone)
 
+    # Update boss record
     bosses[name]["death_time"] = death_time
     bosses[name]["killed_by"] = ctx.author.id
 
-    # Log this kill for weekly statistics (use fresh current time)
+    # ✅ Update kill log (bug fixed here)
     kill_log = load_kill_log()
-    if b_name not in kill_log:
-        kill_log[b_name] = []
-
-    kill_log[b_name].append(now_click.isoformat())  # ✅ correct timestamp
+    if name not in kill_log:
+        kill_log[name] = []
+    kill_log[name].append(death_time.isoformat())
     save_kill_log(kill_log)
 
-    # Clear any existing reminders for this boss
+    # Clear any reminders for this boss
     reminder_sent.discard((name, "1h"))
     reminder_sent.discard((name, "15m"))
     reminder_sent.discard((name, "5m"))
@@ -1623,14 +1627,16 @@ async def boss_tod_edit(ctx, name: str = None, *, new_time: str = None):
 
     await save_bosses()
 
-    respawn_at = death_time + bosses[name]["respawn_time"]
+    respawn_time = bosses[name].get("respawn_time", timedelta(hours=0))
+    respawn_at = death_time + respawn_time
+
     await ctx.send(
         f"✅ Time of Death for **{name}** updated to {death_time.strftime('%m-%d-%Y %I:%M %p')} by {ctx.author.mention}\n"
         f"**Respawn At:** {respawn_at.strftime('%m-%d-%Y %I:%M %p')}"
     )
 
-    # Refresh status embeds
     await refresh_status_message()
+
 
 # Add this command with the others
 @bot.command(name="boss_add_schedule")
