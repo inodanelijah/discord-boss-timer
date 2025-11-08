@@ -29,7 +29,7 @@ from discord.ext import commands, tasks
 from discord.ext.commands import cooldown, BucketType
 from discord.ui import View, Button
 import re
-from dotenv import load_dotenv
+#from dotenv import load_dotenv
 # --- CONFIG ---
 #load_dotenv()  # safe even if .env doesn't exist in Railway
 TOKEN = "MTQxMzI0MTAwNTExNjg4MzA5OA.GeXaIW.Tiahm5xHE9-UDEgIYa656tFXhzSv9yIYA7lUgY"
