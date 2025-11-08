@@ -30,7 +30,9 @@ from discord.ext import commands, tasks
 from discord.ext.commands import cooldown, BucketType
 from discord.ui import View, Button
 import re
+from dotenv import load_dotenv
 # --- CONFIG ---
+load_dotenv()  # safe even if .env doesn't exist in Railway
 # TOKEN = "MTQxMzI0MTAwNTExNjg4MzA5OA.GpyhkL.uaSYogKFGZlqoIhC1ufRfOMMWskFxivUuNrhfw"
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = 1413785757990260836  #field-boss-updates
@@ -2688,4 +2690,7 @@ async def on_ready():
     daily_announcement.start()
 
 # --- RUN ---
-bot.run(TOKEN)
+if TOKEN is None:
+    raise ValueError("❌ DISCORD_TOKEN environment variable not set!")
+else:
+    bot.run(TOKEN)
