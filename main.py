@@ -41,18 +41,15 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True  # 👈 required for get_member and guild.members to work
 intents.guilds = True
-
 TOKEN = os.getenv("DISCORD_TOKEN")
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 if TOKEN is None:
     raise ValueError("❌ DISCORD_TOKEN environment variable not set!")
 else:
     bot.run(TOKEN)
-
 CHANNEL_ID = 1413785757990260836  #field-boss-updates
 status_channel_id = 1416452770017317034 #boss-timer
 sg_timezone = pytz.timezone("Asia/Singapore")
-
 
 # --- MERGED CONTENT FROM script.py START ---
 
