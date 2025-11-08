@@ -33,7 +33,7 @@ import re
 # --- CONFIG ---
 # load_dotenv()  # safe even if .env doesn't exist in Railway
 TOKEN = "MTQxMzI0MTAwNTExNjg4MzA5OA.GeXaIW.Tiahm5xHE9-UDEgIYa656tFXhzSv9yIYA7lUgY"
-# TOKEN = os.getenv("DISCORD_TOKEN")
+TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = 1413785757990260836  #field-boss-updates
 status_channel_id = 1416452770017317034 #boss-timer
 sg_timezone = pytz.timezone("Asia/Singapore")
@@ -2689,4 +2689,7 @@ async def on_ready():
     daily_announcement.start()
 
 # --- RUN ---
+if TOKEN is None:
+    raise ValueError("❌ DISCORD_TOKEN environment variable not set!")
+else:
     bot.run(TOKEN)
