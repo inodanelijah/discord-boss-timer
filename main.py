@@ -2,6 +2,7 @@ import os
 from flask import Flask
 from threading import Thread
 
+
 # --- Flask server to satisfy Render port requirement ---
 app = Flask("")
 
@@ -29,11 +30,18 @@ from discord.ext import commands, tasks
 from discord.ext.commands import cooldown, BucketType
 from discord.ui import View, Button
 import re
-# from dotenv import load_dotenv
+from dotenv import load_dotenv
+
 # --- CONFIG ---
-# load_dotenv()  # safe even if .env doesn't exist in Railway
-# TOKEN = "MTQxMzI0MTAwNTExNjg4MzA5OA.GeXaIW.Tiahm5xHE9-UDEgIYa656tFXhzSv9yIYA7lUgY"
+load_dotenv()  # safe even if .env doesn't exist in Railway
+# TOKEN = "MTQxMzI0MTAwNTExNjg4MzA5OA.GpyhkL.uaSYogKFGZlqoIhC1ufRfOMMWskFxivUuNrhfw"
+
 TOKEN = os.getenv("DISCORD_TOKEN")
+if TOKEN is None:
+    raise ValueError("❌ DISCORD_TOKEN environment variable not set!")
+else:
+    bot.run(TOKEN)
+
 CHANNEL_ID = 1413785757990260836  #field-boss-updates
 status_channel_id = 1416452770017317034 #boss-timer
 sg_timezone = pytz.timezone("Asia/Singapore")
@@ -52,6 +60,9 @@ ATTENDANCE_FILE = "attendance.csv"
 POINTS_FILE = "points.csv"
 KILL_LOG_FILE = "boss_kills.json"
 DATA_FILE = "bosses.json"
+
+attendance_lock = asyncio.Lock()
+points_lock = asyncio.Lock()
 
 # Ensure attendance file exists with headers
 with open(ATTENDANCE_FILE, "a", newline="") as f:
@@ -126,6 +137,36 @@ def get_points(user_id):
                 return int(row["Points"])
     return 0
 
+def delete_user_points(user_id: int):
+    """Remove a user entirely from points.csv."""
+    if not os.path.exists(POINTS_FILE):
+        return False
+
+    users = {}
+    with open(POINTS_FILE, "r") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                uid = int(row["UserID"])
+                points = int(row["Points"])
+                users[uid] = points
+            except Exception:
+                continue
+
+    if user_id not in users:
+        return False
+
+    del users[user_id]
+
+    with open(POINTS_FILE, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["UserID", "Points"])
+        for uid, pts in users.items():
+            writer.writerow([uid, pts])
+
+    return True
+
+
 
 # ----------------- Attendance System -----------------
 class AttendanceView(discord.ui.View):
@@ -145,30 +186,43 @@ class AttendanceView(discord.ui.View):
             return
 
         now = datetime.now().strftime("%H:%M:%S")
-        self.attendees.append({"user_id": user_id, "date": today, "time": now})
 
-        with open(ATTENDANCE_FILE, "a", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([user_display, today, now])
+        async with attendance_lock:
+            self.attendees.append({"user_id": user_id, "date": today, "time": now})
 
-        update_points(user_id, ATTENDANCE_POINTS)
-        total = get_points(user_id)
+            with open(ATTENDANCE_FILE, "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([user_display, today, now])
 
+        async with points_lock:
+            update_points(user_id, ATTENDANCE_POINTS)
+            total = get_points(user_id)
+
+        # Update leaderboard asynchronously without blocking the button
         if points_panel_view:
-            await points_panel_view.update_leaderboard(updated_by=interaction.user)
+            asyncio.create_task(points_panel_view.update_leaderboard(updated_by=interaction.user))
 
-        # Update embed
-        embed = interaction.message.embeds[0]
-        attendees_list = "\n".join([
-            f"• {interaction.guild.get_member(a['user_id']).display_name}"
-            for a in self.attendees if a["date"] == today
-        ])
-        embed.set_field_at(0, name=f"Attendees ({len(self.attendees)})", value=attendees_list or "No attendees yet",
-                           inline=False)
+        # Edit message embed (Discord edit calls can lag under heavy load)
+        try:
+            embed = interaction.message.embeds[0]
+            attendees_list = "\n".join([
+                f"• {interaction.guild.get_member(a['user_id']).display_name}"
+                for a in self.attendees if a["date"] == today
+            ])
+            embed.set_field_at(
+                0,
+                name=f"Attendees ({len(self.attendees)})",
+                value=attendees_list or "No attendees yet",
+                inline=False
+            )
+            await interaction.message.edit(embed=embed, view=self)
+        except Exception as e:
+            print(f"Error updating embed: {e}")
 
-        await interaction.message.edit(embed=embed, view=self)
         await interaction.response.send_message(
-            f"✅ You joined attendance and earned {ATTENDANCE_POINTS} points (Total: {total}).", ephemeral=True)
+            f"✅ You joined attendance and earned {ATTENDANCE_POINTS} points (Total: {total}).",
+            ephemeral=True
+        )
 
     @discord.ui.button(label="Close Attendance", style=discord.ButtonStyle.danger, custom_id="close_btn")
     async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -524,6 +578,72 @@ class PointsPanel(discord.ui.View):
             ephemeral=True
         )
 
+    @discord.ui.button(label="🗑️ Delete User", style=discord.ButtonStyle.danger, row=0)
+    async def delete_user(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Open a modal to delete a user from the points list."""
+        modal = discord.ui.Modal(title="Delete User from Leaderboard")
+
+        name_box = discord.ui.TextInput(
+            label="Discord Nickname or Username",
+            placeholder="Enter nickname, username, or user ID"
+        )
+        modal.add_item(name_box)
+
+        async def on_submit(interaction2: discord.Interaction):
+            name_input = name_box.value.strip()
+
+            # Try to find by ID first
+            target_member = None
+            try:
+                uid = int(name_input)
+                target_member = interaction2.guild.get_member(uid)
+                if not target_member:
+                    # Might be someone who left the server
+                    deleted = delete_user_points(uid)
+                    if deleted:
+                        await interaction2.response.send_message(
+                            f"🗑️ User with ID `{uid}` removed from points list.",
+                            ephemeral=True
+                        )
+                        await self.update_leaderboard(updated_by=interaction2.user.display_name)
+                        return
+                    else:
+                        await interaction2.response.send_message(
+                            f"❌ Could not find user with ID `{uid}` in points list.",
+                            ephemeral=True
+                        )
+                        return
+            except ValueError:
+                # Not an ID — search by name/nickname
+                target_member = discord.utils.find(
+                    lambda m: m.display_name.lower() == name_input.lower() or m.name.lower() == name_input.lower(),
+                    interaction2.guild.members
+                )
+
+            if not target_member:
+                await interaction2.response.send_message(
+                    f"❌ Could not find user `{name_input}` in this server.",
+                    ephemeral=True
+                )
+                return
+
+            deleted = delete_user_points(target_member.id)
+            if deleted:
+                await interaction2.response.send_message(
+                    f"🗑️ {target_member.display_name} has been removed from the points list.",
+                    ephemeral=True
+                )
+                await self.update_leaderboard(updated_by=interaction2.user.display_name)
+            else:
+                await interaction2.response.send_message(
+                    f"❌ {target_member.display_name} was not found in the points list.",
+                    ephemeral=True
+                )
+
+        modal.on_submit = on_submit
+        await interaction.response.send_modal(modal)
+
+
 global points_panel_view  # add this line at the top of your file
 points_panel_view = None  # initialize
 
@@ -708,7 +828,7 @@ class LeaderboardView(discord.ui.View):
 
 @bot.command()
 async def leaderboard(ctx):
-    """Show the top users by points with resolved display names."""
+    """Show the leaderboard in multiple embeds (20 players per page)."""
     if not os.path.exists(POINTS_FILE):
         await ctx.send("❌ No points data yet.")
         return
@@ -722,28 +842,32 @@ async def leaderboard(ctx):
             except Exception:
                 continue
 
+    if not users:
+        await ctx.send("❌ No users found.")
+        return
+
     users.sort(key=lambda x: x[1], reverse=True)
 
     per_page = 20
-    pages = []
-    for i in range(0, len(users), per_page):
-        chunk = users[i:i + per_page]
+    total_pages = (len(users) - 1) // per_page + 1
+
+    for page_num in range(total_pages):
+        start = page_num * per_page
+        end = start + per_page
+        chunk = users[start:end]
+
         desc_lines = []
-        for j, (uid, p) in enumerate(chunk):
+        for i, (uid, points) in enumerate(chunk, start=start + 1):
             name = await resolve_name(ctx.guild, uid)
-            desc_lines.append(f"{i + j + 1}. {name}\t:\t{p} pts")
-        desc = "\n".join(desc_lines) if desc_lines else "No data available."
-        embed = discord.Embed(title="🏆 Points Leaderboard", description=desc, color=discord.Color.gold())
-        embed.set_footer(text=f"Page {i // per_page + 1}/{(len(users) - 1) // per_page + 1}")
-        pages.append(embed)
+            desc_lines.append(f"{i}. {name} — {points} pts")
 
-    if not pages:
-        await ctx.send("❌ No users found.")
-    elif len(pages) == 1:
-        await ctx.send(embed=pages[0])
-    else:
-        await ctx.send(embed=pages[0], view=LeaderboardView(pages))
-
+        desc = "\n".join(desc_lines)
+        embed = discord.Embed(
+            title=f"🏆 Points Leaderboard (Page {page_num + 1}/{total_pages})",
+            description=desc or "No data available.",
+            color=discord.Color.gold()
+        )
+        await ctx.send(embed=embed)
 
 
 
@@ -986,8 +1110,7 @@ async def bidpanel(ctx):
 
 # ----------------- Download/Extract csv files -----------------
 @bot.command()
-@commands.has_any_role("Officer", "Admin")
-async def exportdata(ctx):
+async def exportdata(ctx, error):
     """Export attendance.csv and points.csv (Admin only)."""
     files_to_send = []
     if os.path.exists(ATTENDANCE_FILE):
@@ -1004,7 +1127,6 @@ async def exportdata(ctx):
         await ctx.send("📂 Here are the exported files:", files=files_to_send)
     else:
         await ctx.send("❌ No data files found.")
-
 
 
 # --- MERGED CONTENT FROM script.py END ---
@@ -2025,96 +2147,85 @@ async def boss_weekly_stats(ctx):
 
 @bot.command(name="boss_today")
 async def boss_today(ctx):
-    """
-    Shows all bosses that will spawn today — both scheduled and unscheduled.
-    Sorted by their spawn times in Singapore timezone.
-    """
+    """Show all bosses respawning today, split into multiple embeds if needed."""
     now = datetime.now(sg_timezone)
-    today_name = now.strftime("%A")
     today_bosses = []
 
+    # Find all bosses respawning today
     for boss_name, info in bosses.items():
         is_scheduled = info.get("is_scheduled", False)
 
-        # 🗓️ Scheduled bosses
         if is_scheduled:
-            schedule = info.get("schedule", [])
-            is_daily = info.get("is_daily", False)
-
-            for day, time_str in schedule:
-                if is_daily or day == today_name:
-                    # Parse time safely
-                    time_str_clean = time_str.replace("AM", "").replace("PM", "").strip()
-                    time_parts = time_str_clean.split(":")
-                    hour = int(time_parts[0])
-                    minute = int(time_parts[1])
-
-                    # Adjust for AM/PM
-                    if "PM" in time_str and hour != 12:
-                        hour += 12
-                    if "AM" in time_str and hour == 12:
-                        hour = 0
-
-                    spawn_time = time(hour, minute)
-                    spawn_datetime = sg_timezone.localize(datetime.combine(now.date(), spawn_time))
-                    is_upcoming = spawn_datetime >= now
-
-                    today_bosses.append((boss_name, spawn_datetime, is_upcoming, "Scheduled"))
-
-        # ⚔️ Unscheduled bosses
+            # Scheduled bosses that spawn today
+            spawn_time = info.get("spawn_time")
+            if spawn_time and spawn_time.date() == now.date():
+                schedule = info.get("schedule", [])
+                schedule_text = ", ".join([f"{day} {time}" for day, time in schedule])
+                today_bosses.append({
+                    "name": boss_name,
+                    "spawn_time": spawn_time,
+                    "type": "Scheduled",
+                    "schedule_text": schedule_text
+                })
         else:
+            # Regular bosses that respawn today
             death_time = info.get("death_time")
-            respawn_time = info.get("respawn_time")
-
-            if not respawn_time:
-                continue  # skip if no respawn time set
-
-            # Calculate next respawn
+            respawn_time = info.get("respawn_time", timedelta())
             if death_time:
-                if isinstance(death_time, str):
-                    death_time = datetime.fromisoformat(death_time)
-                    if death_time.tzinfo is None:
-                        death_time = sg_timezone.localize(death_time)
                 respawn_at = death_time + respawn_time
-            else:
-                # If never killed, assume already spawned
-                respawn_at = now
-
-            # Only include if it respawns today
-            if respawn_at.date() == now.date():
-                is_upcoming = respawn_at >= now
-                today_bosses.append((boss_name, respawn_at, is_upcoming, "Unscheduled"))
-
-    # 🕓 Sort all bosses by time
-    today_bosses.sort(key=lambda x: x[1])
-
-    # 🧾 Build embed
-    embed = discord.Embed(
-        title=f"📅 Bosses Spawning Today — {now.strftime('%A, %B %d, %Y')}",
-        description="Here’s today’s schedule for all bosses.",
-        color=discord.Color.gold(),
-        timestamp=now
-    )
+                if respawn_at.date() == now.date():
+                    killed_by = f"<@{info.get('killed_by')}>" if info.get("killed_by") else "N/A"
+                    today_bosses.append({
+                        "name": boss_name,
+                        "spawn_time": respawn_at,
+                        "type": "Regular",
+                        "killed_by": killed_by
+                    })
 
     if not today_bosses:
-        embed.add_field(
-            name="No Boss Spawns Today",
-            value="There are no bosses scheduled or expected to spawn today.",
-            inline=False
-        )
-    else:
-        for boss_name, spawn_dt, is_upcoming, boss_type in today_bosses:
-            time_str = spawn_dt.strftime("%I:%M %p")
-            status = "🕐 Upcoming" if is_upcoming else "✅ Already Spawned"
-            emoji = "🗓️" if boss_type == "Scheduled" else "⚔️"
-            embed.add_field(
-                name=f"{emoji} {boss_name}",
-                value=f"{status} — {time_str}",
-                inline=False
-            )
+        await ctx.send("📅 No bosses respawning today.")
+        return
 
-    embed.set_footer(text="Timezone: Asia/Singapore (SGT)")
-    await ctx.send(embed=embed)
+    # Sort bosses by spawn time
+    today_bosses.sort(key=lambda x: x["spawn_time"])
+
+    # Build description lines
+    lines = []
+    for boss in today_bosses:
+        time_str = boss["spawn_time"].strftime("%I:%M %p")
+        if boss["type"] == "Scheduled":
+            lines.append(f"⚔️ **{boss['name']}** (Scheduled)\n🕓 {time_str}\n📅 {boss['schedule_text']}\n")
+        else:
+            lines.append(f"⚔️ **{boss['name']}** (Regular)\n🕓 {time_str}\n💀 Killed by: {boss.get('killed_by', 'N/A')}\n")
+
+    # --- Split into multiple embeds if content is too long ---
+    embeds = []
+    desc = ""
+    for line in lines:
+        if len(desc) + len(line) > 3900:  # safety margin before 4096 limit
+            embed = discord.Embed(
+                title=f"📅 Today's Boss Respawns ({len(embeds) + 1})",
+                description=desc,
+                color=discord.Color.green()
+            )
+            embeds.append(embed)
+            desc = ""  # start a new page
+        desc += line + "\n"
+
+    # Add last page
+    if desc:
+        embed = discord.Embed(
+            title=f"📅 Today's Boss Respawns ({len(embeds) + 1})",
+            description=desc,
+            color=discord.Color.green()
+        )
+        embeds.append(embed)
+
+    # Send all embeds
+    for i, embed in enumerate(embeds):
+        embed.set_footer(text=f"Page {i + 1}/{len(embeds)} • Timezone: Asia/Singapore")
+        await ctx.send(embed=embed)
+
 
 
 @bot.command(name="boss_reset_after_maintenance")
