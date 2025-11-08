@@ -29,11 +29,11 @@ from discord.ext import commands, tasks
 from discord.ext.commands import cooldown, BucketType
 from discord.ui import View, Button
 import re
-#from dotenv import load_dotenv
+# from dotenv import load_dotenv
 # --- CONFIG ---
-#load_dotenv()  # safe even if .env doesn't exist in Railway
+# load_dotenv()  # safe even if .env doesn't exist in Railway
 TOKEN = "MTQxMzI0MTAwNTExNjg4MzA5OA.GeXaIW.Tiahm5xHE9-UDEgIYa656tFXhzSv9yIYA7lUgY"
-#TOKEN = os.getenv("DISCORD_TOKEN")
+# TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = 1413785757990260836  #field-boss-updates
 status_channel_id = 1416452770017317034 #boss-timer
 sg_timezone = pytz.timezone("Asia/Singapore")
