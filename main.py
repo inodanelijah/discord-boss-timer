@@ -30,7 +30,6 @@ from discord.ext import commands, tasks
 from discord.ext.commands import cooldown, BucketType
 from discord.ui import View, Button
 import re
-
 # --- CONFIG ---
 # TOKEN = "MTQxMzI0MTAwNTExNjg4MzA5OA.GpyhkL.uaSYogKFGZlqoIhC1ufRfOMMWskFxivUuNrhfw"
 TOKEN = os.getenv("DISCORD_TOKEN")
