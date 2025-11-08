@@ -32,7 +32,8 @@ from discord.ui import View, Button
 import re
 
 # --- CONFIG ---
-TOKEN = "MTQxMzI0MTAwNTExNjg4MzA5OA.GpyhkL.uaSYogKFGZlqoIhC1ufRfOMMWskFxivUuNrhfw"
+# TOKEN = "MTQxMzI0MTAwNTExNjg4MzA5OA.GpyhkL.uaSYogKFGZlqoIhC1ufRfOMMWskFxivUuNrhfw"
+TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = 1413785757990260836  #field-boss-updates
 status_channel_id = 1416452770017317034 #boss-timer
 sg_timezone = pytz.timezone("Asia/Singapore")
