@@ -25,10 +25,6 @@ intents.guilds = True
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-if TOKEN is None:
-    raise ValueError("❌ DISCORD_TOKEN environment variable not set!")
-else:
-    bot.run(TOKEN)
 
 CHANNEL_ID = 1413785757990260836  #field-boss-updates
 status_channel_id = 1416452770017317034 #boss-timer
