@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 
 # --- CONFIG ---
 load_dotenv()  # safe even if .env doesn't exist in Railway
-# TOKEN = "MTQxMzI0MTAwNTExNjg4MzA5OA.GpyhkL.uaSYogKFGZlqoIhC1ufRfOMMWskFxivUuNrhfw"
+# TOKEN = "MTQ2MDM1NTU0NDU2Mzg0MzEyMg.GaDeEb.wvTSvg-D6LdipLC_DeO8RvgCKVJgaDbxqfmuBU"
 
 # --- BOT SETUP ---
 intents = discord.Intents.default()
@@ -1836,10 +1836,10 @@ async def boss_tod_edit(ctx, name: str = None, *, new_time: str = None):
 async def boss_add_scheduled(ctx, *, args: str):
     """
     Add a boss with scheduled spawn times
-    Format: /test_add_schedule <name> <day> <time> [<day> <time> ...] OR /test_add_schedule <name> <time> [<time> ...]
+    Format: /boss_add_schedule <name> <day> <time> [<day> <time> ...] OR /boss_add_schedule <name> <time> [<time> ...]
     Examples:
     - Weekly: /boss_add_schedule Dragon Monday 2:30PM Wednesday 7:45PM
-    - Daily: /test_add_schedule Dragon 11:00AM 8:00PM
+    - Daily: /boss_add_schedule Dragon 11:00AM 8:00PM
     """
     try:
         # Parse the arguments
@@ -1898,10 +1898,11 @@ async def boss_add_scheduled(ctx, *, args: str):
         # Calculate next spawn time from the schedule
         now = datetime.now(sg_timezone)
         next_spawn = None
+        all_spawns_today = []  # For debugging/display
 
         for day, time_str in schedule:
             if is_daily:
-                # For daily schedule, calculate next occurrence today or tomorrow
+                # For daily schedule, calculate next occurrence
                 target_date = now.date()
 
                 # Parse 12-hour format time
@@ -1922,19 +1923,16 @@ async def boss_add_scheduled(ctx, *, args: str):
                     datetime.combine(target_date, target_time)
                 )
 
-                # If time already passed today, try tomorrow
+                # FIX: If the time TODAY hasn't passed yet, use TODAY
+                # Only add a day if the time has already passed
                 if candidate < now:
                     candidate += timedelta(days=1)
+
+                all_spawns_today.append(candidate)
             else:
                 # For weekly schedule, find the next occurrence of this day
                 day_idx = days.index(day)
                 current_day_idx = now.weekday()
-
-                days_ahead = day_idx - current_day_idx
-                if days_ahead <= 0:  # Target day already happened this week
-                    days_ahead += 7
-
-                target_date = now + timedelta(days=days_ahead)
 
                 # Parse 12-hour format time
                 time_str_clean = time_str.replace("AM", "").replace("PM", "")
@@ -1949,10 +1947,33 @@ async def boss_add_scheduled(ctx, *, args: str):
                 if "AM" in time_str and hour == 12:
                     hour = 0
 
+                # Calculate days ahead
+                days_ahead = day_idx - current_day_idx
+
+                # FIX: If it's the same day and time hasn't passed yet, use TODAY
+                if days_ahead == 0:
+                    # Same day - check if time has passed
+                    current_time = now.time()
+                    target_time_obj = time(hour, minute)
+
+                    if current_time < target_time_obj:
+                        # Time hasn't passed today - use today
+                        days_ahead = 0
+                    else:
+                        # Time has passed today - use next week
+                        days_ahead = 7
+                elif days_ahead < 0:
+                    # Day already passed this week - use next week
+                    days_ahead += 7
+
+                target_date = now + timedelta(days=days_ahead)
+
                 target_time = time(hour, minute)
                 candidate = sg_timezone.localize(
                     datetime.combine(target_date.date(), target_time)
                 )
+
+                all_spawns_today.append(candidate)
 
             if next_spawn is None or candidate < next_spawn:
                 next_spawn = candidate
@@ -1970,15 +1991,42 @@ async def boss_add_scheduled(ctx, *, args: str):
 
         await save_bosses()
 
+        # Create a nice response message
         if is_daily:
             times = [time for day, time in schedule]
             schedule_text = ", ".join(times)
-            await ctx.send(
-                f"✅ Boss '{name}' added with daily schedule: {schedule_text}. Next spawn: {next_spawn.strftime('%m-%d-%Y %I:%M %p')}")
+
+            # Check if any spawns are today
+            spawns_today = [s for s in all_spawns_today if s.date() == now.date()]
+            if spawns_today:
+                today_times = [s.strftime("%I:%M %p") for s in spawns_today]
+                await ctx.send(
+                    f"✅ Boss '{name}' added with daily schedule: {schedule_text}.\n"
+                    f"**Next spawn:** {next_spawn.strftime('%m-%d-%Y %I:%M %p')}\n"
+                    f"⚠️ **NOTE:** This boss has spawn(s) TODAY at: {', '.join(today_times)}"
+                )
+            else:
+                await ctx.send(
+                    f"✅ Boss '{name}' added with daily schedule: {schedule_text}.\n"
+                    f"**Next spawn:** {next_spawn.strftime('%m-%d-%Y %I:%M %p')}"
+                )
         else:
             schedule_text = ", ".join([f"{day} {time}" for day, time in schedule])
-            await ctx.send(
-                f"✅ Boss '{name}' added with weekly schedule: {schedule_text}. Next spawn: {next_spawn.strftime('%m-%d-%Y %I:%M %p')}")
+
+            # Check if any spawns are today
+            spawns_today = [s for s in all_spawns_today if s.date() == now.date()]
+            if spawns_today:
+                today_times = [s.strftime("%I:%M %p") for s in spawns_today]
+                await ctx.send(
+                    f"✅ Boss '{name}' added with weekly schedule: {schedule_text}.\n"
+                    f"**Next spawn:** {next_spawn.strftime('%m-%d-%Y %I:%M %p')}\n"
+                    f"⚠️ **NOTE:** This boss has spawn(s) TODAY at: {', '.join(today_times)}"
+                )
+            else:
+                await ctx.send(
+                    f"✅ Boss '{name}' added with weekly schedule: {schedule_text}.\n"
+                    f"**Next spawn:** {next_spawn.strftime('%m-%d-%Y %I:%M %p')}"
+                )
 
     except Exception as e:
         await ctx.send(f"❌ Error adding scheduled boss: {str(e)}")
@@ -2863,6 +2911,7 @@ async def help(ctx):
 
 # We need to modify the boss_respawn_notifications function to properly handle respawn alerts
 # --- BOSS RESPAWN NOTIFICATIONS (NO AUTO REFRESH) ---
+# --- BOSS RESPAWN NOTIFICATIONS ---
 @tasks.loop(seconds=5)  # 5 seconds for better precision
 async def boss_respawn_notifications():
     chat_channel = bot.get_channel(CHANNEL_ID)
@@ -2874,76 +2923,85 @@ async def boss_respawn_notifications():
     for boss_name, info in list(bosses.items()):
         is_scheduled = info.get("is_scheduled", False)
 
-        # For scheduled bosses, calculate next spawn based on schedule
+        # SCHEDULED BOSSES
         if is_scheduled:
             schedule = info.get("schedule", [])
             is_daily = info.get("is_daily", False)
 
             # Get the current spawn time
             current_spawn_time = info.get("spawn_time")
+            if not current_spawn_time:
+                continue
 
-            # Always calculate the next spawn time to ensure it's correct
-            next_spawn = None
+            # Calculate all upcoming spawn times from the schedule
+            upcoming_spawns = []
 
             for day, time_str in schedule:
                 if is_daily:
-                    # For daily schedule, calculate next occurrence
-                    target_date = now.date()
+                    # For daily schedule, generate spawns for next 7 days
+                    for days_ahead in range(0, 7):
+                        target_date = now.date() + timedelta(days=days_ahead)
 
-                    # Parse 12-hour format time
-                    time_str_clean = time_str.replace("AM", "").replace("PM", "")
-                    time_parts = time_str_clean.split(":")
-                    hour = int(time_parts[0])
-                    minute = int(time_parts[1])
+                        # Parse time
+                        time_str_clean = time_str.replace("AM", "").replace("PM", "")
+                        time_parts = time_str_clean.split(":")
+                        hour = int(time_parts[0])
+                        minute = int(time_parts[1])
 
-                    # Adjust for PM
-                    if "PM" in time_str and hour != 12:
-                        hour += 12
-                    # Adjust for AM (12AM becomes 0)
-                    if "AM" in time_str and hour == 12:
-                        hour = 0
+                        # Adjust for PM/AM
+                        if "PM" in time_str and hour != 12:
+                            hour += 12
+                        if "AM" in time_str and hour == 12:
+                            hour = 0
 
-                    target_time = time(hour, minute)
-                    candidate = sg_timezone.localize(
-                        datetime.combine(target_date, target_time)
-                    )
+                        target_time = time(hour, minute)
+                        candidate = sg_timezone.localize(
+                            datetime.combine(target_date, target_time)
+                        )
 
-                    # If time already passed today, try tomorrow
-                    if candidate <= now:
-                        candidate += timedelta(days=1)
+                        # Only include future spawns
+                        if candidate > now:
+                            upcoming_spawns.append(candidate)
                 else:
-                    # For weekly schedule, find the next occurrence of this day
+                    # For weekly schedule
                     days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
                     day_idx = days.index(day)
-                    current_day_idx = now.weekday()
 
-                    # ✅ Parse 12-hour format time BEFORE using hour/minute
-                    time_str_clean = time_str.replace("AM", "").replace("PM", "")
-                    time_parts = time_str_clean.split(":")
-                    hour = int(time_parts[0])
-                    minute = int(time_parts[1])
+                    # Check next 2 weeks
+                    for week_offset in range(0, 2):
+                        days_ahead = (day_idx - now.weekday()) + (7 * week_offset)
+                        if days_ahead <= 0:
+                            days_ahead += 7
 
-                    # Adjust for PM
-                    if "PM" in time_str and hour != 12:
-                        hour += 12
-                    # Adjust for AM (12AM becomes 0)
-                    if "AM" in time_str and hour == 12:
-                        hour = 0
+                        target_date = now + timedelta(days=days_ahead)
 
-                    days_ahead = day_idx - current_day_idx
-                    if days_ahead < 0 or (days_ahead == 0 and now.time() > time(hour, minute)):
-                        # Target day already happened this week or time already passed today
-                        days_ahead += 7
+                        # Parse time
+                        time_str_clean = time_str.replace("AM", "").replace("PM", "")
+                        time_parts = time_str_clean.split(":")
+                        hour = int(time_parts[0])
+                        minute = int(time_parts[1])
 
-                    target_date = now + timedelta(days=days_ahead)
+                        # Adjust for PM/AM
+                        if "PM" in time_str and hour != 12:
+                            hour += 12
+                        if "AM" in time_str and hour == 12:
+                            hour = 0
 
-                    target_time = time(hour, minute)
-                    candidate = sg_timezone.localize(
-                        datetime.combine(target_date.date(), target_time)
-                    )
+                        target_time = time(hour, minute)
+                        candidate = sg_timezone.localize(
+                            datetime.combine(target_date.date(), target_time)
+                        )
 
-                if next_spawn is None or candidate < next_spawn:
-                    next_spawn = candidate
+                        if candidate > now:
+                            upcoming_spawns.append(candidate)
+
+            # Sort upcoming spawns and get the next one
+            if upcoming_spawns:
+                upcoming_spawns.sort()
+                next_spawn = upcoming_spawns[0]
+            else:
+                # Fallback calculation
+                next_spawn = current_spawn_time + timedelta(days=1 if is_daily else 7)
 
             # Update the spawn time if it's different
             if current_spawn_time != next_spawn:
@@ -2956,30 +3014,45 @@ async def boss_respawn_notifications():
 
             # 1-hour warning (3600 seconds)
             if 0 < seconds_until_respawn <= 3600 and (boss_name, "1h") not in reminder_sent:
-                # Send warning exactly at 1 hour before
                 if seconds_until_respawn <= 3600 and seconds_until_respawn > 3595:
-                    await chat_channel.send(f"⏰**REMINDER:** @everyone **{boss_name}** will respawn in **1 hour**!")
+                    # ✅ ADD TURN INFORMATION
+                    turn_info = ""
+                    if boss_name in boss_turns and len(boss_turns[boss_name]) > 0:
+                        current_index = boss_current_turn.get(boss_name, 0)
+                        if current_index >= len(boss_turns[boss_name]):
+                            current_index = 0
+                        current_guild = boss_turns[boss_name][current_index]
+                        turn_info = f"\n🎯 **Current turn: {current_guild}**"
+
+                    await chat_channel.send(
+                        f"⏰**REMINDER:** @everyone **{boss_name}** will respawn in **1 hour**!{turn_info}")
                     reminder_sent.add((boss_name, "1h"))
 
             # 15-minute warning (900 seconds)
             if 0 < seconds_until_respawn <= 900 and (boss_name, "15m") not in reminder_sent:
-                # Send warning exactly at 15 minutes before
                 if seconds_until_respawn <= 900 and seconds_until_respawn > 895:
-                    await chat_channel.send(f"⏰**REMINDER:** @everyone **{boss_name}** will respawn in **15 minutes**!")
+                    # ✅ ADD TURN INFORMATION
+                    turn_info = ""
+                    if boss_name in boss_turns and len(boss_turns[boss_name]) > 0:
+                        current_index = boss_current_turn.get(boss_name, 0)
+                        if current_index >= len(boss_turns[boss_name]):
+                            current_index = 0
+                        current_guild = boss_turns[boss_name][current_index]
+                        turn_info = f"\n🎯 **Current turn: {current_guild}**"
+
+                    await chat_channel.send(
+                        f"⏰**REMINDER:** @everyone **{boss_name}** will respawn in **15 minutes**!{turn_info}")
                     reminder_sent.add((boss_name, "15m"))
 
             # 5-minute warning (300 seconds)
             if 0 < seconds_until_respawn <= 300 and (boss_name, "5m") not in reminder_sent:
-                # Send warning exactly at 5 minutes before
                 if seconds_until_respawn <= 300 and seconds_until_respawn > 295:
-                    # ✅ CHECK IF BOSS HAS TURN TRACKING AND GET CURRENT TURN
+                    # ✅ ADD TURN INFORMATION
                     turn_info = ""
                     if boss_name in boss_turns and len(boss_turns[boss_name]) > 0:
-                        # Ensure current turn is within bounds
                         current_index = boss_current_turn.get(boss_name, 0)
                         if current_index >= len(boss_turns[boss_name]):
                             current_index = 0
-
                         current_guild = boss_turns[boss_name][current_index]
                         turn_info = f"\n🎯 **Current turn: {current_guild}**"
 
@@ -2987,124 +3060,36 @@ async def boss_respawn_notifications():
                         f"⏰**REMINDER:** @everyone **{boss_name}** will respawn in **5 minutes**!{turn_info}")
                     reminder_sent.add((boss_name, "5m"))
 
-            # Respawn alert - check if current time is equal to or past the spawn time
-            if now >= current_spawn_time and (boss_name, "respawn") not in reminder_sent:
-                await chat_channel.send(f"✅**ATTENTION!** @everyone __**{boss_name}**__ has respawned! Time to hunt!")
-                # Clear all reminders for this boss when it respawns
-                reminder_sent.discard((boss_name, "1h"))
-                reminder_sent.discard((boss_name, "15m"))
-                reminder_sent.discard((boss_name, "5m"))
-                reminder_sent.add((boss_name, "respawn"))
-
-                # After respawn, calculate next spawn time
-                if is_daily:
-                    next_spawn_time = current_spawn_time + timedelta(days=1)
-                else:
-                    next_spawn_time = current_spawn_time + timedelta(weeks=1)
-                info["spawn_time"] = next_spawn_time
-                await save_bosses()
-
-        # For regular bosses
-        else:
-            death_time = info.get("death_time")
-            respawn_time = info.get("respawn_time", timedelta())
-
-            if not death_time or not respawn_time:
-                continue
-
-            respawn_at = death_time + respawn_time
-            seconds_until_respawn = (respawn_at - now).total_seconds()
-
-            # 1-hour warning (3600 seconds)
-            if 0 < seconds_until_respawn <= 3600 and (boss_name, "1h") not in reminder_sent:
-                # Send warning exactly at 1 hour before
-                if seconds_until_respawn <= 3600 and seconds_until_respawn > 3595:
-                    await chat_channel.send(f"⏰**REMINDER:** @everyone **{boss_name}** will respawn in **1 hour**!")
-                    reminder_sent.add((boss_name, "1h"))
-
-            # 15-minute warning (900 seconds)
-            if 0 < seconds_until_respawn <= 900 and (boss_name, "15m") not in reminder_sent:
-                # Send warning exactly at 15 minutes before
-                if seconds_until_respawn <= 900 and seconds_until_respawn > 895:
-                    await chat_channel.send(f"⏰**REMINDER:** @everyone **{boss_name}** will respawn in **15 minutes**!")
-                    reminder_sent.add((boss_name, "15m"))
-
-            # 5-minute warning (300 seconds)
-            if 0 < seconds_until_respawn <= 300 and (boss_name, "5m") not in reminder_sent:
-                # Send warning exactly at 5 minutes before
-                if seconds_until_respawn <= 300 and seconds_until_respawn > 295:
-                    # ✅ CHECK IF BOSS HAS TURN TRACKING AND GET CURRENT TURN
-                    turn_info = ""
-                    if boss_name in boss_turns and len(boss_turns[boss_name]) > 0:
-                        # Ensure current turn is within bounds
-                        current_index = boss_current_turn.get(boss_name, 0)
-                        if current_index >= len(boss_turns[boss_name]):
-                            current_index = 0
-
-                        current_guild = boss_turns[boss_name][current_index]
-                        turn_info = f"\n🎯 **Current turn: {current_guild}**"
-
-                    await chat_channel.send(
-                        f"⏰**REMINDER:** @everyone **{boss_name}** will respawn in **5 minutes**!{turn_info}")
-                    reminder_sent.add((boss_name, "5m"))
-
-            # Respawn alert
-            # Respawn alert
-            if seconds_until_respawn <= 0 and (boss_name, "respawn") not in reminder_sent:
+            # Respawn alert - boss has spawned
+            spawn_window_end = current_spawn_time + timedelta(minutes=30)
+            if now >= current_spawn_time and now <= spawn_window_end and (boss_name, "respawn") not in reminder_sent:
                 view = View(timeout=None)
-                tod_button = Button(label=f"Time of Death {boss_name}", style=discord.ButtonStyle.danger)
 
-                async def button_callback(interaction, b_name=boss_name, ch=chat_channel):
+                # Create Next Turn button for scheduled bosses
+                next_turn_button = Button(label=f"Next Turn {boss_name}", style=discord.ButtonStyle.primary)
+
+                async def next_turn_callback(interaction, b_name=boss_name, ch=chat_channel):
                     now_click = datetime.now(sg_timezone)
-                    bosses[b_name]["death_time"] = now_click
-                    bosses[b_name]["killed_by"] = interaction.user.id
 
-                    # Log this kill for weekly statistics
-                    kill_log = load_kill_log()
-                    if b_name not in kill_log:
-                        kill_log[b_name] = []
-                    kill_log[b_name].append(now_click.isoformat())
-                    save_kill_log(kill_log)
-
-                    await save_bosses()
-
-                    respawn_at_new = now_click + bosses[b_name]["respawn_time"]
-
-                    # ✅ MAINTENANCE MODE CHECK - THIS MUST BE FIRST!
+                    # ✅ MAINTENANCE MODE CHECK
                     if maintenance_mode:
-                        # MAINTENANCE MODE: Don't advance turns at all
                         await ch.send(
-                            f"⚔️ Boss '{b_name}' marked dead by {interaction.user.mention} at "
-                            f"{now_click.strftime('%m-%d-%Y %I:%M %p')}.\n"
-                            f"Respawns at: {respawn_at_new.strftime('%m-%d-%Y %I:%M %p')}\n"
+                            f"⏭️ **{b_name}** turn update requested by {interaction.user.mention}\n"
                             f"🛠️ **MAINTENANCE MODE** - Turn tracking FROZEN"
                         )
-
-                        # DON'T advance turn counters during maintenance!
-                        # Just send the response and exit
                         try:
-                            await interaction.response.send_message("✅ Time of Death recorded. (Maintenance Mode)",
+                            await interaction.response.send_message("✅ Turn update recorded. (Maintenance Mode)",
                                                                     ephemeral=True)
                         except:
                             pass
-
-                        # Clear reminders
-                        reminder_sent.discard((b_name, "1h"))
-                        reminder_sent.discard((b_name, "15m"))
-                        reminder_sent.discard((b_name, "5m"))
-                        reminder_sent.discard((b_name, "respawn"))
-
                         try:
                             await interaction.message.edit(view=None)
                         except:
                             pass
+                        return
 
-                        await refresh_status_message()
-                        return  # ⚠️ IMPORTANT: Exit early, don't execute normal turn logic
-
-                    # NORMAL MODE: Check if boss has turn tracking
+                    # NORMAL MODE: Advance the turn
                     if b_name in boss_turns and boss_turns[b_name] and len(boss_turns[b_name]) > 0:
-                        # Normal turn tracking logic...
                         if b_name not in boss_current_turn:
                             boss_current_turn[b_name] = 0
 
@@ -3117,7 +3102,193 @@ async def boss_respawn_notifications():
                         current_guild = boss_turns[b_name][current_index]
                         next_guild = boss_turns[b_name][next_index]
 
-                        # ✅ ADVANCE TURN (only in normal mode)
+                        # ADVANCE TURN
+                        boss_current_turn[b_name] = next_index
+
+                        await ch.send(
+                            f"⏭️ **{b_name}** turn advanced by {interaction.user.mention}!\n"
+                            f"✅ Previous turn: **{current_guild}**\n"
+                            f"🔄 Current turn: **{next_guild}**\n"
+                            f"⏰ Time: {now_click.strftime('%m-%d-%Y %I:%M %p')}"
+                        )
+
+                        # Log this turn advancement
+                        kill_log = load_kill_log()
+                        if b_name not in kill_log:
+                            kill_log[b_name] = []
+                        kill_log[b_name].append(now_click.isoformat())
+                        save_kill_log(kill_log)
+                    else:
+                        await ch.send(
+                            f"⚠️ **{b_name}** does not have turn tracking configured.\n"
+                            f"Use `/set_boss_turns {b_name} <guild1> <guild2> ...` to set it up."
+                        )
+
+                    try:
+                        await interaction.response.send_message("✅ Turn advanced.", ephemeral=True)
+                    except:
+                        pass
+
+                    try:
+                        await interaction.message.edit(view=None)
+                    except:
+                        pass
+
+                    await refresh_status_message()
+
+                next_turn_button.callback = next_turn_callback
+                view.add_item(next_turn_button)
+
+                await chat_channel.send(
+                    f"✅**ATTENTION!** @everyone __**{boss_name}**__ has respawned! Time to hunt!",
+                    view=view
+                )
+
+                # Clear reminders
+                reminder_sent.discard((boss_name, "1h"))
+                reminder_sent.discard((boss_name, "15m"))
+                reminder_sent.discard((boss_name, "5m"))
+                reminder_sent.add((boss_name, "respawn"))
+
+                # Calculate next spawn time
+                if upcoming_spawns and len(upcoming_spawns) > 1:
+                    # Find the next spawn after current one
+                    next_spawn_after_current = None
+                    for spawn_time in upcoming_spawns:
+                        if spawn_time > current_spawn_time:
+                            next_spawn_after_current = spawn_time
+                            break
+
+                    if next_spawn_after_current:
+                        info["spawn_time"] = next_spawn_after_current
+                    else:
+                        info["spawn_time"] = current_spawn_time + timedelta(days=1 if is_daily else 7)
+                else:
+                    info["spawn_time"] = current_spawn_time + timedelta(days=1 if is_daily else 7)
+
+                await save_bosses()
+
+        # REGULAR BOSSES
+        else:
+            death_time = info.get("death_time")
+            respawn_time = info.get("respawn_time", timedelta())
+
+            if not death_time or not respawn_time:
+                continue
+
+            respawn_at = death_time + respawn_time
+            seconds_until_respawn = (respawn_at - now).total_seconds()
+
+            # 1-hour warning
+            if 0 < seconds_until_respawn <= 3600 and (boss_name, "1h") not in reminder_sent:
+                if seconds_until_respawn <= 3600 and seconds_until_respawn > 3595:
+                    turn_info = ""
+                    if boss_name in boss_turns and len(boss_turns[boss_name]) > 0:
+                        current_index = boss_current_turn.get(boss_name, 0)
+                        if current_index >= len(boss_turns[boss_name]):
+                            current_index = 0
+                        current_guild = boss_turns[boss_name][current_index]
+                        turn_info = f"\n🎯 **Current turn: {current_guild}**"
+
+                    await chat_channel.send(
+                        f"⏰**REMINDER:** @everyone **{boss_name}** will respawn in **1 hour**!{turn_info}")
+                    reminder_sent.add((boss_name, "1h"))
+
+            # 15-minute warning
+            if 0 < seconds_until_respawn <= 900 and (boss_name, "15m") not in reminder_sent:
+                if seconds_until_respawn <= 900 and seconds_until_respawn > 895:
+                    turn_info = ""
+                    if boss_name in boss_turns and len(boss_turns[boss_name]) > 0:
+                        current_index = boss_current_turn.get(boss_name, 0)
+                        if current_index >= len(boss_turns[boss_name]):
+                            current_index = 0
+                        current_guild = boss_turns[boss_name][current_index]
+                        turn_info = f"\n🎯 **Current turn: {current_guild}**"
+
+                    await chat_channel.send(
+                        f"⏰**REMINDER:** @everyone **{boss_name}** will respawn in **15 minutes**!{turn_info}")
+                    reminder_sent.add((boss_name, "15m"))
+
+            # 5-minute warning
+            if 0 < seconds_until_respawn <= 300 and (boss_name, "5m") not in reminder_sent:
+                if seconds_until_respawn <= 300 and seconds_until_respawn > 295:
+                    turn_info = ""
+                    if boss_name in boss_turns and len(boss_turns[boss_name]) > 0:
+                        current_index = boss_current_turn.get(boss_name, 0)
+                        if current_index >= len(boss_turns[boss_name]):
+                            current_index = 0
+                        current_guild = boss_turns[boss_name][current_index]
+                        turn_info = f"\n🎯 **Current turn: {current_guild}**"
+
+                    await chat_channel.send(
+                        f"⏰**REMINDER:** @everyone **{boss_name}** will respawn in **5 minutes**!{turn_info}")
+                    reminder_sent.add((boss_name, "5m"))
+
+            # Respawn alert for regular bosses
+            if seconds_until_respawn <= 0 and (boss_name, "respawn") not in reminder_sent:
+                view = View(timeout=None)
+
+                # Time of Death button for regular bosses
+                tod_button = Button(label=f"Time of Death {boss_name}", style=discord.ButtonStyle.danger)
+
+                async def button_callback(interaction, b_name=boss_name, ch=chat_channel):
+                    now_click = datetime.now(sg_timezone)
+                    bosses[b_name]["death_time"] = now_click
+                    bosses[b_name]["killed_by"] = interaction.user.id
+
+                    # Log this kill
+                    kill_log = load_kill_log()
+                    if b_name not in kill_log:
+                        kill_log[b_name] = []
+                    kill_log[b_name].append(now_click.isoformat())
+                    save_kill_log(kill_log)
+
+                    await save_bosses()
+
+                    respawn_at_new = now_click + bosses[b_name]["respawn_time"]
+
+                    # MAINTENANCE MODE CHECK
+                    if maintenance_mode:
+                        await ch.send(
+                            f"⚔️ Boss '{b_name}' marked dead by {interaction.user.mention} at "
+                            f"{now_click.strftime('%m-%d-%Y %I:%M %p')}.\n"
+                            f"Respawns at: {respawn_at_new.strftime('%m-%d-%Y %I:%M %p')}\n"
+                            f"🛠️ **MAINTENANCE MODE** - Turn tracking FROZEN"
+                        )
+                        try:
+                            await interaction.response.send_message("✅ Time of Death recorded. (Maintenance Mode)",
+                                                                    ephemeral=True)
+                        except:
+                            pass
+
+                        reminder_sent.discard((b_name, "1h"))
+                        reminder_sent.discard((b_name, "15m"))
+                        reminder_sent.discard((b_name, "5m"))
+                        reminder_sent.discard((b_name, "respawn"))
+
+                        try:
+                            await interaction.message.edit(view=None)
+                        except:
+                            pass
+
+                        await refresh_status_message()
+                        return
+
+                    # NORMAL MODE: Check if boss has turn tracking
+                    if b_name in boss_turns and boss_turns[b_name] and len(boss_turns[b_name]) > 0:
+                        if b_name not in boss_current_turn:
+                            boss_current_turn[b_name] = 0
+
+                        if boss_current_turn[b_name] >= len(boss_turns[b_name]):
+                            boss_current_turn[b_name] = 0
+
+                        current_index = boss_current_turn[b_name]
+                        next_index = (current_index + 1) % len(boss_turns[b_name])
+
+                        current_guild = boss_turns[b_name][current_index]
+                        next_guild = boss_turns[b_name][next_index]
+
+                        # ADVANCE TURN
                         boss_current_turn[b_name] = next_index
 
                         await ch.send(
@@ -3128,7 +3299,6 @@ async def boss_respawn_notifications():
                             f"⏭️ Next turn: **{next_guild}**"
                         )
                     else:
-                        # Boss doesn't have turn tracking
                         await ch.send(
                             f"⚔️ Boss '{b_name}' marked dead by {interaction.user.mention} at "
                             f"{now_click.strftime('%m-%d-%Y %I:%M %p')}.\n"
@@ -3140,7 +3310,6 @@ async def boss_respawn_notifications():
                     except:
                         pass
 
-                    # Clear reminders
                     reminder_sent.discard((b_name, "1h"))
                     reminder_sent.discard((b_name, "15m"))
                     reminder_sent.discard((b_name, "5m"))
@@ -3156,9 +3325,10 @@ async def boss_respawn_notifications():
                 tod_button.callback = button_callback
                 view.add_item(tod_button)
 
-                await chat_channel.send(f"✅**ATTENTION!** @everyone __**{boss_name}**__ has respawned! Time to hunt!",
-                                        view=view)
-                # Clear all reminders for this boss when it respawns
+                await chat_channel.send(
+                    f"✅**ATTENTION!** @everyone __**{boss_name}**__ has respawned! Time to hunt!",
+                    view=view
+                )
                 reminder_sent.discard((boss_name, "1h"))
                 reminder_sent.discard((boss_name, "15m"))
                 reminder_sent.discard((boss_name, "5m"))
