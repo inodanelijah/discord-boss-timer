@@ -2912,6 +2912,7 @@ async def help(ctx):
 # We need to modify the boss_respawn_notifications function to properly handle respawn alerts
 # --- BOSS RESPAWN NOTIFICATIONS (NO AUTO REFRESH) ---
 # --- BOSS RESPAWN NOTIFICATIONS ---
+# --- BOSS RESPAWN NOTIFICATIONS ---
 @tasks.loop(seconds=5)  # 5 seconds for better precision
 async def boss_respawn_notifications():
     chat_channel = bot.get_channel(CHANNEL_ID)
@@ -2966,37 +2967,60 @@ async def boss_respawn_notifications():
                     # For weekly schedule
                     days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
                     day_idx = days.index(day)
+                    current_day_idx = now.weekday()
 
-                    # Check next 2 weeks
-                    for week_offset in range(0, 2):
-                        days_ahead = (day_idx - now.weekday()) + (7 * week_offset)
-                        if days_ahead <= 0:
-                            days_ahead += 7
+                    # Calculate days ahead
+                    days_ahead = day_idx - current_day_idx
 
-                        target_date = now + timedelta(days=days_ahead)
+                    # Parse time for comparison
+                    time_str_clean = time_str.replace("AM", "").replace("PM", "")
+                    time_parts = time_str_clean.split(":")
+                    hour = int(time_parts[0])
+                    minute = int(time_parts[1])
 
-                        # Parse time
-                        time_str_clean = time_str.replace("AM", "").replace("PM", "")
-                        time_parts = time_str_clean.split(":")
-                        hour = int(time_parts[0])
-                        minute = int(time_parts[1])
+                    # Adjust for PM/AM
+                    if "PM" in time_str and hour != 12:
+                        hour += 12
+                    if "AM" in time_str and hour == 12:
+                        hour = 0
 
-                        # Adjust for PM/AM
-                        if "PM" in time_str and hour != 12:
-                            hour += 12
-                        if "AM" in time_str and hour == 12:
-                            hour = 0
+                    # Check if it's the same day
+                    if days_ahead == 0:
+                        # Same day - check if time has passed
+                        current_time = now.time()
+                        target_time_obj = time(hour, minute)
 
-                        target_time = time(hour, minute)
-                        candidate = sg_timezone.localize(
-                            datetime.combine(target_date.date(), target_time)
-                        )
+                        if current_time < target_time_obj:
+                            # Time hasn't passed today - use today
+                            days_ahead = 0
+                        else:
+                            # Time has passed today - use next week
+                            days_ahead = 7
+                    elif days_ahead < 0:
+                        # Day already passed this week - use next week
+                        days_ahead += 7
 
-                        if candidate > now:
-                            upcoming_spawns.append(candidate)
+                    target_date = now + timedelta(days=days_ahead)
+                    target_time = time(hour, minute)
+                    candidate = sg_timezone.localize(
+                        datetime.combine(target_date.date(), target_time)
+                    )
 
-            # Sort upcoming spawns and get the next one
+                    if candidate > now:
+                        upcoming_spawns.append(candidate)
+
+            # Remove duplicates and sort
             if upcoming_spawns:
+                # Remove duplicates by converting to set of timestamps and back
+                unique_spawns = []
+                seen = set()
+                for spawn in upcoming_spawns:
+                    spawn_tuple = (spawn.date(), spawn.hour, spawn.minute)
+                    if spawn_tuple not in seen:
+                        seen.add(spawn_tuple)
+                        unique_spawns.append(spawn)
+
+                upcoming_spawns = unique_spawns
                 upcoming_spawns.sort()
                 next_spawn = upcoming_spawns[0]
             else:
@@ -3333,7 +3357,6 @@ async def boss_respawn_notifications():
                 reminder_sent.discard((boss_name, "15m"))
                 reminder_sent.discard((boss_name, "5m"))
                 reminder_sent.add((boss_name, "respawn"))
-
 # --- AUTO DAILY ANNOUNCEMENT TASK ---
 @tasks.loop(minutes=1)  # Check every minute
 async def daily_announcement():
