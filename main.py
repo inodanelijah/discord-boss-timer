@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 
 # --- CONFIG ---
 load_dotenv()  # safe even if .env doesn't exist in Railway
-# TOKEN = "MTQ2MDM1NTU0NDU2Mzg0MzEyMg.GaDeEb.wvTSvg-D6LdipLC_DeO8RvgCKVJgaDbxqfmuBU"
+# TOKEN = "MTQxMzI0MTAwNTExNjg4MzA5OA.G-iayQ.7ePinRKWsTZWV-KEfJUVbFLGdMIhlXE_OjQOcY"
 
 # --- BOT SETUP ---
 intents = discord.Intents.default()
