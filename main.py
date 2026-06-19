@@ -32,7 +32,7 @@ if TOKEN:
 
 
 CHANNEL_ID = 1415879101473882113  #field-boss-updates
-status_channel_id = 1415901232010235924 #boss-timer
+status_channel_id = 1517530757898178680 #boss-timer
 sg_timezone = pytz.timezone("Asia/Singapore")
 
 # --- MERGED CONTENT FROM script.py START ---
