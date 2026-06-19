@@ -24,7 +24,11 @@ intents.members = True  # 👈 required for get_member and guild.members to work
 intents.guilds = True
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
+#TOKEN = os.getenv("DISCORD_TOKEN")
 TOKEN = os.getenv("DISCORD_TOKEN")
+
+if TOKEN:
+    TOKEN = TOKEN.strip().strip('"').strip("'")
 
 
 CHANNEL_ID = 1415879101473882113  #field-boss-updates
@@ -3536,3 +3540,4 @@ if TOKEN is None:
     raise ValueError("❌ DISCORD_TOKEN environment variable not set!")
 else:
     bot.run(TOKEN)
+
