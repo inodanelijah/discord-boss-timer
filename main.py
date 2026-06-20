@@ -416,12 +416,13 @@ def make_death_view(guild_id, boss_name):
                 ephemeral=True,
             )
             return
+        await interaction.response.defer(ephemeral=True, thinking=True)
         await record_kill(guild_id, boss_name, interaction.user, interaction.channel)
-        await interaction.response.send_message("Time of death recorded.", ephemeral=True)
         try:
             await interaction.message.edit(view=None)
         except discord.HTTPException:
             pass
+        await interaction.followup.send("Time of death recorded.", ephemeral=True)
 
     button.callback = callback
     view.add_item(button)
@@ -450,17 +451,18 @@ def make_next_turn_view(guild_id, boss_name):
         if not current_turn:
             await interaction.response.send_message("No turn order is configured for this boss.", ephemeral=True)
             return
+        await interaction.response.defer(ephemeral=True, thinking=True)
         await save_data()
         await interaction.channel.send(
             f"**{boss_name}** turn advanced by {interaction.user.mention}.\n"
             f"Previous turn: **{current_turn}**\nCurrent turn: **{next_turn}**"
         )
-        await interaction.response.send_message("Turn advanced.", ephemeral=True)
         try:
             await interaction.message.edit(view=None)
         except discord.HTTPException:
             pass
         await refresh_status_message(guild_id, state)
+        await interaction.followup.send("Turn advanced.", ephemeral=True)
 
     button.callback = callback
     view.add_item(button)
@@ -500,13 +502,14 @@ def make_status_turn_view(guild_id, state, rows):
             if not current_turn:
                 await interaction.response.send_message("No turn order is configured for this boss.", ephemeral=True)
                 return
+            await interaction.response.defer(ephemeral=True, thinking=True)
             await save_data()
             await interaction.channel.send(
                 f"**{b_name}** turn advanced by {interaction.user.mention}.\n"
                 f"Previous turn: **{current_turn}**\nCurrent turn: **{next_turn}**"
             )
-            await interaction.response.send_message("Turn advanced.", ephemeral=True)
             await refresh_status_message(guild_id, current_state)
+            await interaction.followup.send("Turn advanced.", ephemeral=True)
 
         button.callback = callback
         view.add_item(button)
