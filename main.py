@@ -205,6 +205,7 @@ def serialize_boss(info):
         else None,
         "respawn_hours": info.get("respawn_time", timedelta()).total_seconds() / 3600,
         "killed_by": info.get("killed_by"),
+        "region": info.get("region"),
         "schedule": info.get("schedule", []),
         "is_scheduled": info.get("is_scheduled", False),
         "is_daily": info.get("is_daily", False),
@@ -219,6 +220,7 @@ def parse_bosses(raw_bosses):
             "death_time": parse_datetime(info.get("death_time")),
             "respawn_time": timedelta(hours=float(info.get("respawn_hours", 0))),
             "killed_by": info.get("killed_by"),
+            "region": info.get("region"),
             "schedule": [tuple(item) for item in info.get("schedule", [])],
             "is_scheduled": info.get("is_scheduled", False),
             "is_daily": info.get("is_daily", False),
@@ -307,6 +309,23 @@ def schedule_text(info):
     return ", ".join(f"{day} {time_text}" for day, time_text in info.get("schedule", []))
 
 
+def region_line(info):
+    region = (info.get("region") or "").strip()
+    return f"\nRegion: **{region}**" if region else ""
+
+
+def plain_region_line(info):
+    region = (info.get("region") or "").strip()
+    return f"\nRegion: {region}" if region else ""
+
+
+def clean_region(region):
+    if not region:
+        return None
+    cleaned = region.strip().strip('"').strip("'").strip()
+    return cleaned or None
+
+
 def get_current_turn(state, boss_name):
     turns = state["boss_turns"].get(boss_name, [])
     if not turns:
@@ -376,6 +395,7 @@ async def record_kill(guild_id, boss_name, user, channel):
     await channel.send(
         f"Boss **{boss_name}** marked dead by {user.mention} at "
         f"{killed_at.strftime('%m-%d-%Y %I:%M %p')}.\n"
+        f"{plain_region_line(boss).lstrip() + chr(10) if boss.get('region') else ''}"
         f"Respawns at: **{respawn_at.strftime('%m-%d-%Y %I:%M %p')}**{turn_line}"
     )
     await refresh_status_message(guild_id, state)
@@ -447,6 +467,54 @@ def make_next_turn_view(guild_id, boss_name):
     return view
 
 
+def make_status_turn_view(guild_id, state, rows):
+    view = View(timeout=None)
+    added = 0
+    for boss_name, _, _, _ in rows:
+        if boss_name not in state["boss_turns"] or not state["boss_turns"][boss_name]:
+            continue
+        if added >= 25:
+            break
+
+        button = Button(
+            label=f"Next Turn {boss_name}"[:80],
+            style=discord.ButtonStyle.primary,
+            custom_id=f"status_next_turn:{guild_id}:{added}",
+        )
+
+        async def callback(interaction, b_name=boss_name):
+            current_state = get_state_by_id(guild_id)
+            if not current_state:
+                await interaction.response.send_message("This Discord server is not configured yet.", ephemeral=True)
+                return
+            if not can_use_boss_button(current_state, interaction.user):
+                await interaction.response.send_message(
+                    f"Only {button_role_text(current_state, interaction.guild)} can use boss buttons.",
+                    ephemeral=True,
+                )
+                return
+            if current_state["maintenance_mode"]:
+                await interaction.response.send_message("Maintenance mode is ON. Turn not advanced.", ephemeral=True)
+                return
+            current_turn, next_turn = advance_turn(current_state, b_name)
+            if not current_turn:
+                await interaction.response.send_message("No turn order is configured for this boss.", ephemeral=True)
+                return
+            await save_data()
+            await interaction.channel.send(
+                f"**{b_name}** turn advanced by {interaction.user.mention}.\n"
+                f"Previous turn: **{current_turn}**\nCurrent turn: **{next_turn}**"
+            )
+            await interaction.response.send_message("Turn advanced.", ephemeral=True)
+            await refresh_status_message(guild_id, current_state)
+
+        button.callback = callback
+        view.add_item(button)
+        added += 1
+
+    return view if added else None
+
+
 def boss_rows(state):
     rows = []
     current_time = now_sg()
@@ -466,30 +534,41 @@ def boss_rows(state):
     return rows
 
 
-def boss_status_embeds(state, title=None):
+def boss_status_payloads(state, title=None):
     title = title or f"LordNine Boss Timers - {state.get('name', 'Server')}"
     rows = boss_rows(state)
     if not rows:
-        return [discord.Embed(title=title, description="No bosses added yet.", color=discord.Color.blue())]
+        return [(discord.Embed(title=title, description="No bosses added yet.", color=discord.Color.blue()), [])]
 
-    embeds = []
+    payloads = []
     for index in range(0, len(rows), 25):
         embed = discord.Embed(title=title, color=discord.Color.blue())
-        for name, boss_type, spawn_at, sched_text in rows[index : index + 25]:
+        row_chunk = rows[index : index + 25]
+        for name, boss_type, spawn_at, sched_text in row_chunk:
+            info = state["bosses"].get(name, {})
             turn = get_current_turn(state, name)
             turn_line = f"\nTurn: **{turn}**" if turn else ""
             if spawn_at:
                 delta = spawn_at - now_sg()
                 status = "Alive" if delta.total_seconds() <= 0 else "Respawning"
-                value = f"Type: **{boss_type}**\nStatus: **{status}**\nNext: **{spawn_at.strftime('%m-%d-%Y %I:%M %p')}**"
+                value = (
+                    f"Type: **{boss_type}**"
+                    f"{region_line(info)}\n"
+                    f"Status: **{status}**\n"
+                    f"Next: **{spawn_at.strftime('%m-%d-%Y %I:%M %p')}**"
+                )
             else:
-                value = f"Type: **{boss_type}**\nNext: **Not set**"
+                value = f"Type: **{boss_type}**{region_line(info)}\nNext: **Not set**"
             if sched_text:
                 value += f"\nSchedule: {sched_text}"
             value += turn_line
             embed.add_field(name=name, value=value, inline=False)
-        embeds.append(embed)
-    return embeds
+        payloads.append((embed, row_chunk))
+    return payloads
+
+
+def boss_status_embeds(state, title=None):
+    return [embed for embed, _ in boss_status_payloads(state, title)]
 
 
 async def refresh_status_message(guild_id, state=None):
@@ -500,11 +579,22 @@ async def refresh_status_message(guild_id, state=None):
     channel = bot.get_channel(channel_id) if channel_id else None
     if not channel:
         return
+    payloads = boss_status_payloads(state)
+    existing_messages = []
     async for message in channel.history(limit=20):
         if message.author == bot.user and message.embeds:
-            await message.delete()
-    for embed in boss_status_embeds(state):
-        await channel.send(embed=embed)
+            existing_messages.append(message)
+
+    existing_messages.reverse()
+    for index, (embed, rows) in enumerate(payloads):
+        view = make_status_turn_view(guild_id, state, rows)
+        if index < len(existing_messages):
+            await existing_messages[index].edit(embed=embed, view=view)
+        else:
+            await channel.send(embed=embed, view=view)
+
+    for extra_message in existing_messages[len(payloads) :]:
+        await extra_message.delete()
 
 
 def scheduled_spawns_on_date(info, target_date):
@@ -527,13 +617,13 @@ def todays_bosses(state, remaining_only=False):
         if info.get("is_scheduled"):
             for spawn_at in scheduled_spawns_on_date(info, today):
                 if not remaining_only or spawn_at >= current_time:
-                    rows.append((name, "Scheduled", spawn_at))
+                    rows.append((name, "Scheduled", spawn_at, info))
         else:
             death_time = info.get("death_time")
             if death_time:
                 spawn_at = death_time + info.get("respawn_time", timedelta())
                 if spawn_at.date() == today and (not remaining_only or spawn_at >= current_time):
-                    rows.append((name, "Regular", spawn_at))
+                    rows.append((name, "Regular", spawn_at, info))
     rows.sort(key=lambda row: row[2])
     return rows
 
@@ -550,25 +640,36 @@ async def send_today_announcement(channel, state, title, remaining_only=False, p
         await channel.send(embed=embed)
         return
 
-    scheduled_count = sum(1 for _, boss_type, _ in rows if boss_type == "Scheduled")
+    scheduled_count = sum(1 for _, boss_type, _, _ in rows if boss_type == "Scheduled")
     regular_count = len(rows) - scheduled_count
-    embed = discord.Embed(
-        title=title,
-        description=(
-            f"**Server:** {state.get('name', 'Unknown')}\n"
-            f"**Date:** {date_text}\n"
-            f"**Total:** {len(rows)} spawn(s) | Scheduled: {scheduled_count} | Regular: {regular_count}"
-        ),
-        color=discord.Color.gold(),
-    )
-    groups = {}
-    for name, boss_type, spawn_at in rows:
-        turn = get_current_turn(state, name)
-        turn_text = f" - Turn: {turn}" if turn else ""
-        groups.setdefault(spawn_at.strftime("%I:%M %p"), []).append(f"**{name}** ({boss_type}){turn_text}")
-    for time_text, names in groups.items():
-        embed.add_field(name=time_text, value="\n".join(names), inline=False)
-    await channel.send("@everyone" if ping else None, embed=embed)
+    content = "@everyone" if ping else None
+    for index in range(0, len(rows), 25):
+        chunk = rows[index : index + 25]
+        page_text = f" (Page {(index // 25) + 1})" if len(rows) > 25 else ""
+        embed = discord.Embed(
+            title=f"{title}{page_text}",
+            description=(
+                f"**Server:** {state.get('name', 'Unknown')}\n"
+                f"**Date:** {date_text}\n"
+                f"**Total:** {len(rows)} spawn(s) | Scheduled: {scheduled_count} | Regular: {regular_count}"
+            ),
+            color=discord.Color.gold(),
+        )
+        for name, boss_type, spawn_at, info in chunk:
+            turn = get_current_turn(state, name)
+            lines = []
+            if info.get("region"):
+                lines.append(f"Region: {info['region']}")
+            lines.append(f"Respawn: {spawn_at.strftime('%I:%M %p')}")
+            if turn:
+                lines.append(f"Turn: {turn}")
+            embed.add_field(
+                name=f"Boss: {name} ({boss_type})",
+                value="\n".join(lines),
+                inline=False,
+            )
+        await channel.send(content, embed=embed)
+        content = None
 
 
 @bot.command(name="boss_setup")
@@ -598,22 +699,42 @@ async def boss_button_role(ctx, role: discord.Role = None):
         await ctx.send(f"Boss buttons can now be clicked by everyone in **{ctx.guild.name}**.")
 
 
-@bot.command(name="boss_add")
+@bot.command(name="boss_add", aliases=["add_boss"])
 @commands.has_permissions(administrator=True)
-async def boss_add(ctx, name: str, respawn_hours: float):
+async def boss_add(ctx, name: str, respawn_hours: float, *, region: str = None):
     state = get_state(ctx.guild)
+    region = clean_region(region)
     state["bosses"][name] = {
         "spawn_time": now_sg(),
         "death_time": None,
         "respawn_time": timedelta(hours=respawn_hours),
         "killed_by": None,
+        "region": region,
         "schedule": [],
         "is_scheduled": False,
         "is_daily": False,
     }
     await save_data()
     await refresh_status_message(ctx.guild.id, state)
-    await ctx.send(f"Boss **{name}** added to **{ctx.guild.name}** with {respawn_hours:g} hour respawn.")
+    region_text = f"\nRegion: **{region}**" if region else ""
+    await ctx.send(f"Boss **{name}** added to **{ctx.guild.name}** with {respawn_hours:g} hour respawn.{region_text}")
+
+
+@bot.command(name="boss_region")
+@commands.has_permissions(administrator=True)
+async def boss_region(ctx, name: str, *, region: str = None):
+    state = get_state(ctx.guild)
+    region = clean_region(region)
+    if name not in state["bosses"]:
+        await ctx.send(f"Boss **{name}** was not found in **{ctx.guild.name}**.")
+        return
+    state["bosses"][name]["region"] = region
+    await save_data()
+    await refresh_status_message(ctx.guild.id, state)
+    if region:
+        await ctx.send(f"Region for **{name}** set to **{region}**.")
+    else:
+        await ctx.send(f"Region cleared for **{name}**.")
 
 
 @bot.command(name="boss_delete")
@@ -701,6 +822,7 @@ async def boss_add_scheduled(ctx, *, args: str):
         "death_time": None,
         "respawn_time": timedelta(days=1 if not is_weekly else 7),
         "killed_by": None,
+        "region": None,
         "schedule": schedule,
         "is_scheduled": True,
         "is_daily": not is_weekly,
@@ -863,7 +985,9 @@ async def help_command(ctx):
     embed.add_field(
         name="Bosses",
         value=(
-            "`!boss_add <name> <respawn_hours>`\n"
+            "`!boss_add <name> <respawn_hours> [region]`\n"
+            "`!add_boss <name> <respawn_hours> [region]`\n"
+            "`!boss_region <name> [region]`\n"
             "`!boss_delete <name>`\n"
             "`!boss_tod_edit <name> <MM-DD-YYYY HH:MM AM/PM>`\n"
             "`!boss_add_schedule <name> <time...>`\n"
@@ -924,7 +1048,8 @@ async def boss_respawn_notifications():
                 key = reminder_key(guild_id, boss_name, spawn_at, label)
                 if 0 < seconds_until <= seconds and key not in reminder_sent:
                     await channel.send(
-                        f"@everyone **{boss_name}** will respawn in **{label_text}**!{turn_line}"
+                        f"@everyone **{boss_name}** will respawn in **{label_text}**!"
+                        f"{plain_region_line(info)}{turn_line}"
                     )
                     reminder_sent.add(key)
 
@@ -932,7 +1057,8 @@ async def boss_respawn_notifications():
             if seconds_until <= 0 and respawn_key not in reminder_sent:
                 view = make_next_turn_view(guild_id, boss_name) if info.get("is_scheduled") else make_death_view(guild_id, boss_name)
                 await channel.send(
-                    f"@everyone **{boss_name}** has respawned! Time to hunt!{turn_line}",
+                    f"@everyone **{boss_name}** has respawned! Time to hunt!"
+                    f"{plain_region_line(info)}{turn_line}",
                     view=view,
                 )
                 reminder_sent.add(respawn_key)
