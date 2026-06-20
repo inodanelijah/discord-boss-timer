@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import shlex
@@ -15,8 +16,8 @@ load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN", "").strip().strip('"').strip("'")
 COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
-ANNOUNCE_CHANNEL_ID = int(os.getenv("BOSS_ANNOUNCE_CHANNEL_ID", "1415879101473882113"))
-STATUS_CHANNEL_ID = int(os.getenv("BOSS_STATUS_CHANNEL_ID", "1517530757898178680"))
+DEFAULT_ANNOUNCE_CHANNEL_ID = int(os.getenv("BOSS_ANNOUNCE_CHANNEL_ID", "1415879101473882113"))
+DEFAULT_STATUS_CHANNEL_ID = int(os.getenv("BOSS_STATUS_CHANNEL_ID", "1517530757898178680"))
 TIMEZONE = ZoneInfo(os.getenv("BOSS_TIMEZONE", "Asia/Singapore"))
 
 DATA_FILE = Path(os.getenv("BOSS_DATA_FILE", "bosses.json"))
@@ -28,14 +29,11 @@ intents.guilds = True
 intents.members = True
 bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, help_command=None)
 
-bosses = {}
-guilds = []
-boss_turns = {}
-boss_current_turn = {}
-maintenance_mode = False
+data = {"servers": {}}
+legacy_state = None
 
-# Reminder keys include the target spawn timestamp. This fixes scheduled bosses:
-# when the next scheduled spawn is saved, old reminders cannot block new ones.
+# Reminder keys include Discord server ID and target spawn timestamp, so Santiago
+# and Sven can have different timers for the same boss name without collisions.
 reminder_sent = set()
 daily_announcements_sent = set()
 
@@ -94,9 +92,96 @@ def parse_time_text(value):
     raise ValueError(f"Invalid time: {value}")
 
 
-def reminder_key(boss_name, spawn_time, label):
+def atomic_write_json(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with tmp_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+        f.write("\n")
+    tmp_path.replace(path)
+
+
+def storage_status(path):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        test_path = path.parent / ".boss_timer_write_test"
+        test_path.write_text("ok", encoding="utf-8")
+        test_path.unlink(missing_ok=True)
+        writable = True
+    except Exception:
+        writable = False
+
+    return {
+        "path": str(path.resolve()),
+        "exists": path.exists(),
+        "writable": writable,
+    }
+
+
+def make_empty_state(guild=None):
+    return {
+        "name": guild.name if guild else "Unknown Discord Server",
+        "announce_channel_id": None,
+        "status_channel_id": None,
+        "bosses": {},
+        "guilds": [],
+        "boss_turns": {},
+        "boss_current_turn": {},
+        "maintenance_mode": False,
+        "button_role_id": None,
+    }
+
+
+def migrate_old_payload(payload):
+    return {
+        "name": "Migrated Timers",
+        "announce_channel_id": DEFAULT_ANNOUNCE_CHANNEL_ID,
+        "status_channel_id": DEFAULT_STATUS_CHANNEL_ID,
+        "bosses": parse_bosses(payload.get("bosses", payload)),
+        "guilds": payload.get("guilds", []),
+        "boss_turns": payload.get("boss_turns", {}),
+        "boss_current_turn": payload.get("boss_current_turn", {}),
+        "maintenance_mode": payload.get("maintenance_mode", False),
+        "button_role_id": payload.get("button_role_id"),
+    }
+
+
+def get_state(guild):
+    global legacy_state
+    if guild is None:
+        raise commands.CommandError("This command must be used inside a Discord server.")
+
+    guild_id = str(guild.id)
+    if guild_id not in data["servers"]:
+        if legacy_state and not data["servers"]:
+            state = copy.deepcopy(legacy_state)
+            state["name"] = guild.name
+            legacy_state = None
+        else:
+            state = make_empty_state(guild)
+        data["servers"][guild_id] = state
+    else:
+        state = data["servers"][guild_id]
+        state["name"] = guild.name
+
+    state.setdefault("announce_channel_id", None)
+    state.setdefault("status_channel_id", None)
+    state.setdefault("bosses", {})
+    state.setdefault("guilds", [])
+    state.setdefault("boss_turns", {})
+    state.setdefault("boss_current_turn", {})
+    state.setdefault("maintenance_mode", False)
+    state.setdefault("button_role_id", None)
+    return state
+
+
+def get_state_by_id(guild_id):
+    return data["servers"].get(str(guild_id))
+
+
+def reminder_key(guild_id, boss_name, spawn_time, label):
     stamp = ensure_aware(spawn_time).isoformat()
-    return boss_name.lower(), stamp, label
+    return str(guild_id), boss_name.lower(), stamp, label
 
 
 def load_kill_log():
@@ -107,8 +192,7 @@ def load_kill_log():
 
 
 def save_kill_log(log):
-    with KILL_LOG_FILE.open("w", encoding="utf-8") as f:
-        json.dump(log, f, indent=2)
+    atomic_write_json(KILL_LOG_FILE, log)
 
 
 def serialize_boss(info):
@@ -127,29 +211,10 @@ def serialize_boss(info):
     }
 
 
-async def save_bosses():
-    payload = {
-        "bosses": {name: serialize_boss(info) for name, info in bosses.items()},
-        "guilds": guilds,
-        "boss_turns": boss_turns,
-        "boss_current_turn": boss_current_turn,
-        "maintenance_mode": maintenance_mode,
-    }
-    with DATA_FILE.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-
-
-def load_bosses():
-    global guilds, boss_turns, boss_current_turn, maintenance_mode
-    if not DATA_FILE.exists():
-        return
-    with DATA_FILE.open("r", encoding="utf-8") as f:
-        payload = json.load(f)
-
-    raw_bosses = payload.get("bosses", payload)
-    bosses.clear()
+def parse_bosses(raw_bosses):
+    parsed = {}
     for name, info in raw_bosses.items():
-        bosses[name] = {
+        parsed[name] = {
             "spawn_time": parse_datetime(info.get("spawn_time")),
             "death_time": parse_datetime(info.get("death_time")),
             "respawn_time": timedelta(hours=float(info.get("respawn_hours", 0))),
@@ -158,22 +223,67 @@ def load_bosses():
             "is_scheduled": info.get("is_scheduled", False),
             "is_daily": info.get("is_daily", False),
         }
+    return parsed
 
-    guilds = payload.get("guilds", [])
-    boss_turns = payload.get("boss_turns", {})
-    boss_current_turn = payload.get("boss_current_turn", {})
-    maintenance_mode = payload.get("maintenance_mode", False)
+
+async def save_data():
+    payload = {"servers": {}}
+    for guild_id, state in data["servers"].items():
+        payload["servers"][guild_id] = {
+            "name": state.get("name", "Unknown Discord Server"),
+            "announce_channel_id": state.get("announce_channel_id"),
+            "status_channel_id": state.get("status_channel_id"),
+            "bosses": {name: serialize_boss(info) for name, info in state.get("bosses", {}).items()},
+            "guilds": state.get("guilds", []),
+            "boss_turns": state.get("boss_turns", {}),
+            "boss_current_turn": state.get("boss_current_turn", {}),
+            "maintenance_mode": state.get("maintenance_mode", False),
+            "button_role_id": state.get("button_role_id"),
+        }
+    atomic_write_json(DATA_FILE, payload)
+
+
+def load_data():
+    global data, legacy_state
+    source_file = DATA_FILE
+    if not source_file.exists():
+        repo_file = Path("bosses.json")
+        if DATA_FILE != repo_file and repo_file.exists():
+            source_file = repo_file
+            print(f"{DATA_FILE} not found. Importing existing {repo_file} for first persistent save.")
+        else:
+            return
+
+    with source_file.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    if "servers" not in payload:
+        legacy_state = migrate_old_payload(payload)
+        data = {"servers": {}}
+        return
+
+    data = {"servers": {}}
+    for guild_id, state in payload.get("servers", {}).items():
+        data["servers"][str(guild_id)] = {
+            "name": state.get("name", "Unknown Discord Server"),
+            "announce_channel_id": state.get("announce_channel_id", DEFAULT_ANNOUNCE_CHANNEL_ID),
+            "status_channel_id": state.get("status_channel_id", DEFAULT_STATUS_CHANNEL_ID),
+            "bosses": parse_bosses(state.get("bosses", {})),
+            "guilds": state.get("guilds", []),
+            "boss_turns": state.get("boss_turns", {}),
+            "boss_current_turn": state.get("boss_current_turn", {}),
+            "maintenance_mode": state.get("maintenance_mode", False),
+            "button_role_id": state.get("button_role_id"),
+        }
 
 
 def next_scheduled_spawn(info, after=None):
     after = ensure_aware(after or now_sg())
-    schedule = info.get("schedule", [])
-    is_daily = info.get("is_daily", False)
     upcoming = []
 
-    for day, time_text in schedule:
+    for day, time_text in info.get("schedule", []):
         spawn_time = parse_time_text(time_text)
-        if is_daily:
+        if info.get("is_daily"):
             for offset in range(0, 8):
                 candidate_date = (after + timedelta(days=offset)).date()
                 candidate = datetime.combine(candidate_date, spawn_time, TIMEZONE)
@@ -197,63 +307,96 @@ def schedule_text(info):
     return ", ".join(f"{day} {time_text}" for day, time_text in info.get("schedule", []))
 
 
-def get_current_turn(boss_name):
-    turns = boss_turns.get(boss_name, [])
+def get_current_turn(state, boss_name):
+    turns = state["boss_turns"].get(boss_name, [])
     if not turns:
         return None
-    index = boss_current_turn.get(boss_name, 0) % len(turns)
-    boss_current_turn[boss_name] = index
+    index = state["boss_current_turn"].get(boss_name, 0) % len(turns)
+    state["boss_current_turn"][boss_name] = index
     return turns[index]
 
 
-def advance_turn(boss_name):
-    turns = boss_turns.get(boss_name, [])
+def advance_turn(state, boss_name):
+    turns = state["boss_turns"].get(boss_name, [])
     if not turns:
         return None, None
-    current_index = boss_current_turn.get(boss_name, 0) % len(turns)
+    current_index = state["boss_current_turn"].get(boss_name, 0) % len(turns)
     next_index = (current_index + 1) % len(turns)
-    boss_current_turn[boss_name] = next_index
+    state["boss_current_turn"][boss_name] = next_index
     return turns[current_index], turns[next_index]
 
 
-async def record_kill(boss_name, user, channel):
-    boss = bosses[boss_name]
+def can_use_boss_button(state, member):
+    role_id = state.get("button_role_id")
+    if not role_id:
+        return True
+    if getattr(member.guild_permissions, "administrator", False):
+        return True
+    return any(role.id == role_id for role in getattr(member, "roles", []))
+
+
+def button_role_text(state, guild):
+    role_id = state.get("button_role_id")
+    if not role_id:
+        return "Everyone"
+    role = guild.get_role(role_id) if guild else None
+    return role.mention if role else f"Role ID {role_id}"
+
+
+async def record_kill(guild_id, boss_name, user, channel):
+    state = get_state_by_id(guild_id)
+    if not state or boss_name not in state["bosses"]:
+        await channel.send(f"Boss **{boss_name}** was not found for this Discord server.")
+        return
+
+    boss = state["bosses"][boss_name]
     killed_at = now_sg()
     boss["death_time"] = killed_at
     boss["killed_by"] = user.id
 
     log = load_kill_log()
-    log.setdefault(boss_name, []).append(killed_at.isoformat())
+    server_log = log.setdefault(str(guild_id), {})
+    server_log.setdefault(boss_name, []).append(killed_at.isoformat())
     save_kill_log(log)
 
     respawn_at = killed_at + boss.get("respawn_time", timedelta())
     for label, _, _ in REMINDERS:
-        reminder_sent.discard(reminder_key(boss_name, respawn_at, label))
-    reminder_sent.discard(reminder_key(boss_name, respawn_at, "respawn"))
+        reminder_sent.discard(reminder_key(guild_id, boss_name, respawn_at, label))
+    reminder_sent.discard(reminder_key(guild_id, boss_name, respawn_at, "respawn"))
 
     turn_line = ""
-    if maintenance_mode:
+    if state["maintenance_mode"]:
         turn_line = "\nMaintenance mode is ON. Turn tracking was not advanced."
     else:
-        current_turn, next_turn = advance_turn(boss_name)
+        current_turn, next_turn = advance_turn(state, boss_name)
         if current_turn:
             turn_line = f"\nCurrent turn: **{current_turn}**\nNext turn: **{next_turn}**"
 
-    await save_bosses()
+    await save_data()
     await channel.send(
         f"Boss **{boss_name}** marked dead by {user.mention} at "
         f"{killed_at.strftime('%m-%d-%Y %I:%M %p')}.\n"
         f"Respawns at: **{respawn_at.strftime('%m-%d-%Y %I:%M %p')}**{turn_line}"
     )
-    await refresh_status_message()
+    await refresh_status_message(guild_id, state)
 
 
-def make_death_view(boss_name):
+def make_death_view(guild_id, boss_name):
     view = View(timeout=None)
     button = Button(label=f"Time of Death {boss_name}", style=discord.ButtonStyle.danger)
 
     async def callback(interaction):
-        await record_kill(boss_name, interaction.user, interaction.channel)
+        state = get_state_by_id(guild_id)
+        if not state:
+            await interaction.response.send_message("This Discord server is not configured yet.", ephemeral=True)
+            return
+        if not can_use_boss_button(state, interaction.user):
+            await interaction.response.send_message(
+                f"Only {button_role_text(state, interaction.guild)} can use boss buttons.",
+                ephemeral=True,
+            )
+            return
+        await record_kill(guild_id, boss_name, interaction.user, interaction.channel)
         await interaction.response.send_message("Time of death recorded.", ephemeral=True)
         try:
             await interaction.message.edit(view=None)
@@ -265,19 +408,29 @@ def make_death_view(boss_name):
     return view
 
 
-def make_next_turn_view(boss_name):
+def make_next_turn_view(guild_id, boss_name):
     view = View(timeout=None)
     button = Button(label=f"Next Turn {boss_name}", style=discord.ButtonStyle.primary)
 
     async def callback(interaction):
-        if maintenance_mode:
+        state = get_state_by_id(guild_id)
+        if not state:
+            await interaction.response.send_message("This Discord server is not configured yet.", ephemeral=True)
+            return
+        if not can_use_boss_button(state, interaction.user):
+            await interaction.response.send_message(
+                f"Only {button_role_text(state, interaction.guild)} can use boss buttons.",
+                ephemeral=True,
+            )
+            return
+        if state["maintenance_mode"]:
             await interaction.response.send_message("Maintenance mode is ON. Turn not advanced.", ephemeral=True)
             return
-        current_turn, next_turn = advance_turn(boss_name)
+        current_turn, next_turn = advance_turn(state, boss_name)
         if not current_turn:
             await interaction.response.send_message("No turn order is configured for this boss.", ephemeral=True)
             return
-        await save_bosses()
+        await save_data()
         await interaction.channel.send(
             f"**{boss_name}** turn advanced by {interaction.user.mention}.\n"
             f"Previous turn: **{current_turn}**\nCurrent turn: **{next_turn}**"
@@ -287,21 +440,21 @@ def make_next_turn_view(boss_name):
             await interaction.message.edit(view=None)
         except discord.HTTPException:
             pass
-        await refresh_status_message()
+        await refresh_status_message(guild_id, state)
 
     button.callback = callback
     view.add_item(button)
     return view
 
 
-def boss_rows():
+def boss_rows(state):
     rows = []
-    now = now_sg()
-    for name, info in bosses.items():
+    current_time = now_sg()
+    for name, info in state["bosses"].items():
         if info.get("is_scheduled"):
             spawn_at = info.get("spawn_time")
-            if not spawn_at or spawn_at <= now - timedelta(minutes=30):
-                spawn_at = next_scheduled_spawn(info, now)
+            if not spawn_at or spawn_at <= current_time - timedelta(minutes=30):
+                spawn_at = next_scheduled_spawn(info, current_time)
                 info["spawn_time"] = spawn_at
             rows.append((name, "Scheduled", spawn_at, schedule_text(info)))
         else:
@@ -313,8 +466,9 @@ def boss_rows():
     return rows
 
 
-def boss_status_embeds(title="LordNine Boss Timers"):
-    rows = boss_rows()
+def boss_status_embeds(state, title=None):
+    title = title or f"LordNine Boss Timers - {state.get('name', 'Server')}"
+    rows = boss_rows(state)
     if not rows:
         return [discord.Embed(title=title, description="No bosses added yet.", color=discord.Color.blue())]
 
@@ -322,7 +476,7 @@ def boss_status_embeds(title="LordNine Boss Timers"):
     for index in range(0, len(rows), 25):
         embed = discord.Embed(title=title, color=discord.Color.blue())
         for name, boss_type, spawn_at, sched_text in rows[index : index + 25]:
-            turn = get_current_turn(name)
+            turn = get_current_turn(state, name)
             turn_line = f"\nTurn: **{turn}**" if turn else ""
             if spawn_at:
                 delta = spawn_at - now_sg()
@@ -338,14 +492,18 @@ def boss_status_embeds(title="LordNine Boss Timers"):
     return embeds
 
 
-async def refresh_status_message():
-    channel = bot.get_channel(STATUS_CHANNEL_ID)
+async def refresh_status_message(guild_id, state=None):
+    state = state or get_state_by_id(guild_id)
+    if not state:
+        return
+    channel_id = state.get("status_channel_id")
+    channel = bot.get_channel(channel_id) if channel_id else None
     if not channel:
         return
     async for message in channel.history(limit=20):
         if message.author == bot.user and message.embeds:
             await message.delete()
-    for embed in boss_status_embeds():
+    for embed in boss_status_embeds(state):
         await channel.send(embed=embed)
 
 
@@ -361,11 +519,11 @@ def scheduled_spawns_on_date(info, target_date):
     return spawns
 
 
-def todays_bosses(remaining_only=False):
+def todays_bosses(state, remaining_only=False):
     current_time = now_sg()
     today = current_time.date()
     rows = []
-    for name, info in bosses.items():
+    for name, info in state["bosses"].items():
         if info.get("is_scheduled"):
             for spawn_at in scheduled_spawns_on_date(info, today):
                 if not remaining_only or spawn_at >= current_time:
@@ -380,8 +538,8 @@ def todays_bosses(remaining_only=False):
     return rows
 
 
-async def send_today_announcement(channel, title, remaining_only=False):
-    rows = todays_bosses(remaining_only=remaining_only)
+async def send_today_announcement(channel, state, title, remaining_only=False, ping=True):
+    rows = todays_bosses(state, remaining_only=remaining_only)
     date_text = now_sg().strftime("%A, %B %d, %Y")
     if not rows:
         embed = discord.Embed(
@@ -397,6 +555,7 @@ async def send_today_announcement(channel, title, remaining_only=False):
     embed = discord.Embed(
         title=title,
         description=(
+            f"**Server:** {state.get('name', 'Unknown')}\n"
             f"**Date:** {date_text}\n"
             f"**Total:** {len(rows)} spawn(s) | Scheduled: {scheduled_count} | Regular: {regular_count}"
         ),
@@ -404,18 +563,46 @@ async def send_today_announcement(channel, title, remaining_only=False):
     )
     groups = {}
     for name, boss_type, spawn_at in rows:
-        turn = get_current_turn(name)
+        turn = get_current_turn(state, name)
         turn_text = f" - Turn: {turn}" if turn else ""
         groups.setdefault(spawn_at.strftime("%I:%M %p"), []).append(f"**{name}** ({boss_type}){turn_text}")
     for time_text, names in groups.items():
         embed.add_field(name=time_text, value="\n".join(names), inline=False)
-    await channel.send("@everyone", embed=embed)
+    await channel.send("@everyone" if ping else None, embed=embed)
+
+
+@bot.command(name="boss_setup")
+@commands.has_permissions(administrator=True)
+async def boss_setup(ctx, announce_channel: discord.TextChannel = None, status_channel: discord.TextChannel = None):
+    state = get_state(ctx.guild)
+    state["announce_channel_id"] = (announce_channel or ctx.channel).id
+    state["status_channel_id"] = (status_channel or announce_channel or ctx.channel).id
+    await save_data()
+    await refresh_status_message(ctx.guild.id, state)
+    await ctx.send(
+        f"Boss timer setup saved for **{ctx.guild.name}**.\n"
+        f"Announcements: <#{state['announce_channel_id']}>\n"
+        f"Status panel: <#{state['status_channel_id']}>"
+    )
+
+
+@bot.command(name="boss_button_role")
+@commands.has_permissions(administrator=True)
+async def boss_button_role(ctx, role: discord.Role = None):
+    state = get_state(ctx.guild)
+    state["button_role_id"] = role.id if role else None
+    await save_data()
+    if role:
+        await ctx.send(f"Boss buttons are now limited to {role.mention} and administrators in **{ctx.guild.name}**.")
+    else:
+        await ctx.send(f"Boss buttons can now be clicked by everyone in **{ctx.guild.name}**.")
 
 
 @bot.command(name="boss_add")
 @commands.has_permissions(administrator=True)
 async def boss_add(ctx, name: str, respawn_hours: float):
-    bosses[name] = {
+    state = get_state(ctx.guild)
+    state["bosses"][name] = {
         "spawn_time": now_sg(),
         "death_time": None,
         "respawn_time": timedelta(hours=respawn_hours),
@@ -424,51 +611,54 @@ async def boss_add(ctx, name: str, respawn_hours: float):
         "is_scheduled": False,
         "is_daily": False,
     }
-    await save_bosses()
-    await refresh_status_message()
-    await ctx.send(f"Boss **{name}** added with {respawn_hours:g} hour respawn.")
+    await save_data()
+    await refresh_status_message(ctx.guild.id, state)
+    await ctx.send(f"Boss **{name}** added to **{ctx.guild.name}** with {respawn_hours:g} hour respawn.")
 
 
 @bot.command(name="boss_delete")
 @commands.has_permissions(administrator=True)
 async def boss_delete(ctx, name: str):
-    if bosses.pop(name, None) is None:
-        await ctx.send(f"Boss **{name}** was not found.")
+    state = get_state(ctx.guild)
+    if state["bosses"].pop(name, None) is None:
+        await ctx.send(f"Boss **{name}** was not found in **{ctx.guild.name}**.")
         return
-    boss_turns.pop(name, None)
-    boss_current_turn.pop(name, None)
-    await save_bosses()
-    await refresh_status_message()
-    await ctx.send(f"Boss **{name}** deleted.")
+    state["boss_turns"].pop(name, None)
+    state["boss_current_turn"].pop(name, None)
+    await save_data()
+    await refresh_status_message(ctx.guild.id, state)
+    await ctx.send(f"Boss **{name}** deleted from **{ctx.guild.name}**.")
 
 
 @bot.command(name="boss_tod_edit")
 @commands.has_permissions(administrator=True)
 async def boss_tod_edit(ctx, name: str = None, *, new_time: str = None):
+    state = get_state(ctx.guild)
     if not name or not new_time:
         await ctx.send("Usage: `!boss_tod_edit <boss> <MM-DD-YYYY HH:MM AM/PM>`")
         return
-    if name not in bosses:
-        await ctx.send(f"Boss **{name}** was not found.")
+    if name not in state["bosses"]:
+        await ctx.send(f"Boss **{name}** was not found in **{ctx.guild.name}**.")
         return
-    if bosses[name].get("is_scheduled"):
+    if state["bosses"][name].get("is_scheduled"):
         await ctx.send("Scheduled bosses use their schedule. Time of death only applies to regular bosses.")
         return
     death_time = parse_datetime(new_time)
     if not death_time:
         await ctx.send("Invalid date. Use `MM-DD-YYYY HH:MM AM/PM`, for example `06-20-2026 08:30 PM`.")
         return
-    bosses[name]["death_time"] = death_time
-    bosses[name]["killed_by"] = ctx.author.id
-    await save_bosses()
-    await refresh_status_message()
-    respawn_at = death_time + bosses[name].get("respawn_time", timedelta())
-    await ctx.send(f"Updated **{name}** TOD. Respawn: **{respawn_at.strftime('%m-%d-%Y %I:%M %p')}**")
+    state["bosses"][name]["death_time"] = death_time
+    state["bosses"][name]["killed_by"] = ctx.author.id
+    await save_data()
+    await refresh_status_message(ctx.guild.id, state)
+    respawn_at = death_time + state["bosses"][name].get("respawn_time", timedelta())
+    await ctx.send(f"Updated **{name}** TOD for **{ctx.guild.name}**. Respawn: **{respawn_at.strftime('%m-%d-%Y %I:%M %p')}**")
 
 
 @bot.command(name="boss_add_schedule")
 @commands.has_permissions(administrator=True)
 async def boss_add_scheduled(ctx, *, args: str):
+    state = get_state(ctx.guild)
     try:
         parts = shlex.split(args)
     except ValueError as exc:
@@ -516,11 +706,11 @@ async def boss_add_scheduled(ctx, *, args: str):
         "is_daily": not is_weekly,
     }
     info["spawn_time"] = next_scheduled_spawn(info, now_sg())
-    bosses[name] = info
-    await save_bosses()
-    await refresh_status_message()
+    state["bosses"][name] = info
+    await save_data()
+    await refresh_status_message(ctx.guild.id, state)
     await ctx.send(
-        f"Scheduled boss **{name}** added.\n"
+        f"Scheduled boss **{name}** added to **{ctx.guild.name}**.\n"
         f"Schedule: {schedule_text(info)}\n"
         f"Next spawn: **{info['spawn_time'].strftime('%m-%d-%Y %I:%M %p')}**"
     )
@@ -528,27 +718,30 @@ async def boss_add_scheduled(ctx, *, args: str):
 
 @bot.command(name="boss_status")
 async def boss_status(ctx):
-    for embed in boss_status_embeds():
+    state = get_state(ctx.guild)
+    for embed in boss_status_embeds(state):
         await ctx.send(embed=embed)
 
 
 @bot.command(name="boss_today")
 async def boss_today(ctx):
-    await send_today_announcement(ctx.channel, "Today's Boss Schedule")
+    state = get_state(ctx.guild)
+    await send_today_announcement(ctx.channel, state, "Today's Boss Schedule", ping=False)
 
 
 @bot.command(name="boss_alive")
 async def boss_alive(ctx):
-    now = now_sg()
+    state = get_state(ctx.guild)
+    current_time = now_sg()
     alive = []
-    for name, info in bosses.items():
+    for name, info in state["bosses"].items():
         if info.get("is_scheduled"):
             spawn_at = info.get("spawn_time")
-            if spawn_at and spawn_at <= now <= spawn_at + timedelta(minutes=30):
+            if spawn_at and spawn_at <= current_time <= spawn_at + timedelta(minutes=30):
                 alive.append(name)
         else:
             death_time = info.get("death_time")
-            if not death_time or now >= death_time + info.get("respawn_time", timedelta()):
+            if not death_time or current_time >= death_time + info.get("respawn_time", timedelta()):
                 alive.append(name)
     await ctx.send("Alive bosses: " + (", ".join(alive) if alive else "None"))
 
@@ -556,86 +749,117 @@ async def boss_alive(ctx):
 @bot.command(name="guild_add")
 @commands.has_permissions(administrator=True)
 async def guild_add(ctx, *, guild_name: str):
-    if guild_name not in guilds:
-        guilds.append(guild_name)
-        await save_bosses()
-    await ctx.send(f"Guild **{guild_name}** added.")
+    state = get_state(ctx.guild)
+    if guild_name not in state["guilds"]:
+        state["guilds"].append(guild_name)
+        await save_data()
+    await ctx.send(f"Guild **{guild_name}** added to **{ctx.guild.name}**.")
 
 
 @bot.command(name="guild_list")
 async def guild_list(ctx):
-    await ctx.send("Guilds: " + (", ".join(guilds) if guilds else "None"))
+    state = get_state(ctx.guild)
+    await ctx.send("Guilds: " + (", ".join(state["guilds"]) if state["guilds"] else "None"))
 
 
 @bot.command(name="guild_delete")
 @commands.has_permissions(administrator=True)
 async def guild_delete(ctx, *, guild_name: str):
-    if guild_name in guilds:
-        guilds.remove(guild_name)
-    for boss_name, turns in list(boss_turns.items()):
-        boss_turns[boss_name] = [turn for turn in turns if turn != guild_name]
-    await save_bosses()
-    await ctx.send(f"Guild **{guild_name}** deleted.")
+    state = get_state(ctx.guild)
+    if guild_name in state["guilds"]:
+        state["guilds"].remove(guild_name)
+    for boss_name, turns in list(state["boss_turns"].items()):
+        state["boss_turns"][boss_name] = [turn for turn in turns if turn != guild_name]
+    await save_data()
+    await ctx.send(f"Guild **{guild_name}** deleted from **{ctx.guild.name}**.")
 
 
 @bot.command(name="set_boss_turns")
 @commands.has_permissions(administrator=True)
 async def set_boss_turns(ctx, boss_name: str, *guild_order):
-    if boss_name not in bosses:
-        await ctx.send(f"Boss **{boss_name}** was not found.")
+    state = get_state(ctx.guild)
+    if boss_name not in state["bosses"]:
+        await ctx.send(f"Boss **{boss_name}** was not found in **{ctx.guild.name}**.")
         return
     if not guild_order:
         await ctx.send("Add at least one guild name.")
         return
-    boss_turns[boss_name] = list(guild_order)
-    boss_current_turn[boss_name] = 0
-    await save_bosses()
-    await refresh_status_message()
-    await ctx.send(f"Turn order for **{boss_name}**: " + " -> ".join(guild_order))
+    state["boss_turns"][boss_name] = list(guild_order)
+    state["boss_current_turn"][boss_name] = 0
+    await save_data()
+    await refresh_status_message(ctx.guild.id, state)
+    await ctx.send(f"Turn order for **{boss_name}** in **{ctx.guild.name}**: " + " -> ".join(guild_order))
 
 
 @bot.command(name="check_turn")
 async def check_turn(ctx, boss_name: str):
-    turn = get_current_turn(boss_name)
-    await ctx.send(f"Current turn for **{boss_name}**: **{turn or 'Not configured'}**")
+    state = get_state(ctx.guild)
+    turn = get_current_turn(state, boss_name)
+    await ctx.send(f"Current turn for **{boss_name}** in **{ctx.guild.name}**: **{turn or 'Not configured'}**")
 
 
 @bot.command(name="clear_boss_turns")
 @commands.has_permissions(administrator=True)
 async def clear_boss_turns(ctx, boss_name: str):
-    boss_turns.pop(boss_name, None)
-    boss_current_turn.pop(boss_name, None)
-    await save_bosses()
-    await refresh_status_message()
-    await ctx.send(f"Turn order cleared for **{boss_name}**.")
+    state = get_state(ctx.guild)
+    state["boss_turns"].pop(boss_name, None)
+    state["boss_current_turn"].pop(boss_name, None)
+    await save_data()
+    await refresh_status_message(ctx.guild.id, state)
+    await ctx.send(f"Turn order cleared for **{boss_name}** in **{ctx.guild.name}**.")
 
 
 @bot.command(name="maintenance_on")
 @commands.has_permissions(administrator=True)
 async def maintenance_on(ctx):
-    global maintenance_mode
-    maintenance_mode = True
-    await save_bosses()
-    await ctx.send("Maintenance mode is ON. Boss timers continue, but turns will not advance.")
+    state = get_state(ctx.guild)
+    state["maintenance_mode"] = True
+    await save_data()
+    await ctx.send(f"Maintenance mode is ON for **{ctx.guild.name}**. Boss timers continue, but turns will not advance.")
 
 
 @bot.command(name="maintenance_off")
 @commands.has_permissions(administrator=True)
 async def maintenance_off(ctx):
-    global maintenance_mode
-    maintenance_mode = False
-    await save_bosses()
-    await ctx.send("Maintenance mode is OFF. Turn tracking will advance normally.")
+    state = get_state(ctx.guild)
+    state["maintenance_mode"] = False
+    await save_data()
+    await ctx.send(f"Maintenance mode is OFF for **{ctx.guild.name}**. Turn tracking will advance normally.")
 
 
 @bot.command(name="maintenance_status")
 async def maintenance_status(ctx):
-    await ctx.send(f"Maintenance mode: **{'ON' if maintenance_mode else 'OFF'}**")
+    state = get_state(ctx.guild)
+    await ctx.send(f"Maintenance mode for **{ctx.guild.name}**: **{'ON' if state['maintenance_mode'] else 'OFF'}**")
+
+
+@bot.command(name="boss_storage")
+@commands.has_permissions(administrator=True)
+async def boss_storage(ctx):
+    boss_file = storage_status(DATA_FILE)
+    kill_file = storage_status(KILL_LOG_FILE)
+    await ctx.send(
+        "**Boss Timer Storage**\n"
+        f"Boss data: `{boss_file['path']}`\n"
+        f"Boss data exists: **{boss_file['exists']}** | Writable: **{boss_file['writable']}**\n"
+        f"Kill log: `{kill_file['path']}`\n"
+        f"Kill log exists: **{kill_file['exists']}** | Writable: **{kill_file['writable']}**"
+    )
 
 
 @bot.command(name="help")
 async def help_command(ctx):
     embed = discord.Embed(title="Boss Timer Commands", color=discord.Color.blue())
+    embed.add_field(
+        name="Setup",
+        value=(
+            "`!boss_setup #announce-channel #status-channel`\n"
+            "`!boss_button_role @role` - restrict TOD/Next Turn buttons\n"
+            "`!boss_button_role` - allow everyone to click buttons\n"
+            "`!boss_storage`"
+        ),
+        inline=False,
+    )
     embed.add_field(
         name="Bosses",
         value=(
@@ -662,60 +886,60 @@ async def help_command(ctx):
         value="`!maintenance_on`, `!maintenance_off`, `!maintenance_status`",
         inline=False,
     )
+    embed.set_footer(text="Each Discord server has its own separate boss timers.")
     await ctx.send(embed=embed)
 
 
 @tasks.loop(seconds=10)
 async def boss_respawn_notifications():
-    channel = bot.get_channel(ANNOUNCE_CHANNEL_ID)
-    if not channel:
-        return
-
     current_time = now_sg()
-    changed = False
 
-    for boss_name, info in list(bosses.items()):
-        if info.get("is_scheduled"):
-            spawn_at = info.get("spawn_time")
-            if not spawn_at or spawn_at <= current_time - timedelta(minutes=30):
-                info["spawn_time"] = next_scheduled_spawn(info, current_time)
-                spawn_at = info["spawn_time"]
-                changed = True
-            if not spawn_at:
-                continue
-        else:
-            death_time = info.get("death_time")
-            if not death_time:
-                continue
-            spawn_at = death_time + info.get("respawn_time", timedelta())
+    for guild_id, state in list(data["servers"].items()):
+        channel_id = state.get("announce_channel_id")
+        channel = bot.get_channel(channel_id) if channel_id else None
+        if not channel:
+            continue
 
-        seconds_until = (spawn_at - current_time).total_seconds()
-        turn = get_current_turn(boss_name)
-        turn_line = f"\nCurrent turn: **{turn}**" if turn else ""
-
-        for label, seconds, label_text in REMINDERS:
-            key = reminder_key(boss_name, spawn_at, label)
-            if 0 < seconds_until <= seconds and key not in reminder_sent:
-                await channel.send(
-                    f"@everyone **{boss_name}** will respawn in **{label_text}**!{turn_line}"
-                )
-                reminder_sent.add(key)
-
-        respawn_key = reminder_key(boss_name, spawn_at, "respawn")
-        if seconds_until <= 0 and respawn_key not in reminder_sent:
+        changed = False
+        for boss_name, info in list(state["bosses"].items()):
             if info.get("is_scheduled"):
-                view = make_next_turn_view(boss_name)
+                spawn_at = info.get("spawn_time")
+                if not spawn_at or spawn_at <= current_time - timedelta(minutes=30):
+                    info["spawn_time"] = next_scheduled_spawn(info, current_time)
+                    spawn_at = info["spawn_time"]
+                    changed = True
+                if not spawn_at:
+                    continue
             else:
-                view = make_death_view(boss_name)
-            await channel.send(
-                f"@everyone **{boss_name}** has respawned! Time to hunt!{turn_line}",
-                view=view,
-            )
-            reminder_sent.add(respawn_key)
+                death_time = info.get("death_time")
+                if not death_time:
+                    continue
+                spawn_at = death_time + info.get("respawn_time", timedelta())
 
-    if changed:
-        await save_bosses()
-        await refresh_status_message()
+            seconds_until = (spawn_at - current_time).total_seconds()
+            turn = get_current_turn(state, boss_name)
+            turn_line = f"\nCurrent turn: **{turn}**" if turn else ""
+
+            for label, seconds, label_text in REMINDERS:
+                key = reminder_key(guild_id, boss_name, spawn_at, label)
+                if 0 < seconds_until <= seconds and key not in reminder_sent:
+                    await channel.send(
+                        f"@everyone **{boss_name}** will respawn in **{label_text}**!{turn_line}"
+                    )
+                    reminder_sent.add(key)
+
+            respawn_key = reminder_key(guild_id, boss_name, spawn_at, "respawn")
+            if seconds_until <= 0 and respawn_key not in reminder_sent:
+                view = make_next_turn_view(guild_id, boss_name) if info.get("is_scheduled") else make_death_view(guild_id, boss_name)
+                await channel.send(
+                    f"@everyone **{boss_name}** has respawned! Time to hunt!{turn_line}",
+                    view=view,
+                )
+                reminder_sent.add(respawn_key)
+
+        if changed:
+            await save_data()
+            await refresh_status_message(guild_id, state)
 
 
 @boss_respawn_notifications.before_loop
@@ -729,18 +953,20 @@ async def daily_announcement():
     if not ((current_time.hour == 0 and current_time.minute == 0) or (current_time.hour == 8 and current_time.minute == 0)):
         return
 
-    key = (current_time.date().isoformat(), current_time.hour)
-    if key in daily_announcements_sent:
-        return
-    daily_announcements_sent.add(key)
+    for guild_id, state in list(data["servers"].items()):
+        key = (str(guild_id), current_time.date().isoformat(), current_time.hour)
+        if key in daily_announcements_sent:
+            continue
+        daily_announcements_sent.add(key)
 
-    channel = bot.get_channel(ANNOUNCE_CHANNEL_ID)
-    if not channel:
-        return
-    if current_time.hour == 0:
-        await send_today_announcement(channel, "Today's Full Boss Schedule", remaining_only=False)
-    else:
-        await send_today_announcement(channel, "Remaining Bosses Today", remaining_only=True)
+        channel_id = state.get("announce_channel_id")
+        channel = bot.get_channel(channel_id) if channel_id else None
+        if not channel:
+            continue
+        if current_time.hour == 0:
+            await send_today_announcement(channel, state, "Today's Full Boss Schedule", remaining_only=False)
+        else:
+            await send_today_announcement(channel, state, "Remaining Bosses Today", remaining_only=True)
 
 
 @daily_announcement.before_loop
@@ -760,10 +986,13 @@ async def on_message(message):
 
     prefixes = (COMMAND_PREFIX,) if isinstance(COMMAND_PREFIX, str) else tuple(COMMAND_PREFIX)
     if all(line.startswith(prefixes) for line in lines):
-        for line in lines:
-            line_message = message
-            line_message.content = line
-            await bot.process_commands(line_message)
+        original_content = message.content
+        try:
+            for line in lines:
+                message.content = line
+                await bot.process_commands(message)
+        finally:
+            message.content = original_content
         return
 
     await bot.process_commands(message)
@@ -772,15 +1001,20 @@ async def on_message(message):
 @bot.event
 async def on_ready():
     print(f"Bot logged in as {bot.user}")
-    load_bosses()
+    load_data()
 
-    # Discord can fire on_ready more than once after reconnects.
+    # Create a server state for every Discord server where the bot is installed.
+    for guild in bot.guilds:
+        get_state(guild)
+    await save_data()
+
     if not boss_respawn_notifications.is_running():
         boss_respawn_notifications.start()
     if not daily_announcement.is_running():
         daily_announcement.start()
 
-    await refresh_status_message()
+    for guild in bot.guilds:
+        await refresh_status_message(guild.id, get_state(guild))
 
 
 if not TOKEN:
