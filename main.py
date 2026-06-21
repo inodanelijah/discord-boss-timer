@@ -590,11 +590,10 @@ async def refresh_status_message(guild_id, state=None):
 
     existing_messages.reverse()
     for index, (embed, rows) in enumerate(payloads):
-        view = make_status_turn_view(guild_id, state, rows)
         if index < len(existing_messages):
-            await existing_messages[index].edit(embed=embed, view=view)
+            await existing_messages[index].edit(embed=embed, view=None)
         else:
-            await channel.send(embed=embed, view=view)
+            await channel.send(embed=embed)
 
     for extra_message in existing_messages[len(payloads) :]:
         await extra_message.delete()
